@@ -2643,7 +2643,6 @@ static void peep_udpate_ride_sub_state_13(rct_peep* peep){
 
 		peep->destination_x = x;
 		peep->destination_y = y;
-		return;
 	}
 
 	peep->var_37 |= 3;
@@ -6848,6 +6847,146 @@ static uint8 sub_6949A4(sint16 x, sint16 y, sint16 z, rct_map_element *inputMapE
 
 /* rct2: 0x00695225 */
 static int guest_path_find_aimless(rct_peep* peep, uint8 edges){
+	bool guseLegacyPathfinding = 0; //TEMPORARY; NOT ACTUAL GLOBAL VARIABLE; Placeholder declaration until a proper config entry is made in the options menu
+	uint8 crowdCheckProb = 3; //1 out of x guests check the crowd around them, this value can be adjusted
+	uint8 crowdToleranceThreshold = 2;
+	uint8 numEdges = 0;
+	uint16 x = peep->next_x;
+	uint16 y = peep->next_y;
+	uint16 z = peep->next_z;
+	uint16 neighboringX;
+	uint16 neighboringY;
+	rct_map_element *mapElement = map_get_path_element_at(x / 32, y / 32, z);
+	//Crowd counters for each adjacent path direction
+	uint8 crowd0 = 0;
+	uint8 crowd1 = 0;
+	uint8 crowd2 = 0;
+	uint8 crowd3 = 0;
+
+	//Check for surrounding crowd levels
+	if (((scenario_rand() % crowdCheckProb) == 0) && !(guseLegacyPathfinding)) {
+		//counting number of edges
+		for (int chosenDirection = 0; chosenDirection < 4; chosenDirection++) {
+			if (!(edges & (1 << chosenDirection))) {
+				numEdges += 1;
+			}
+		}
+
+
+		if (numEdges > 2) {
+			for (int chosenDirection = 0; chosenDirection < 4; chosenDirection++) {
+				//If there is no path in that direction try another
+				if (!(edges & (1 << chosenDirection))) {
+					switch (chosenDirection) {
+					case 0:
+						crowd0 = 250;
+						break;
+					case 1:
+						crowd1 = 250;
+						break;
+					case 2:
+						crowd2 = 250;
+						break;
+					case 3:
+						crowd3 = 250;
+						break;
+					default:
+						break;
+					}
+					continue;
+				}
+				if (sub_694BAE(peep->next_x, peep->next_y, peep->next_z, mapElement, chosenDirection) == 6) {
+					//Grabbing neighboring path tile coordinates
+					neighboringX = x;
+					neighboringY = y;
+					neighboringX += TileDirectionDelta[chosenDirection].x;
+					neighboringY += TileDirectionDelta[chosenDirection].y;
+
+					//Counting peeps on neighboring tile
+					uint16 sprite_id = RCT2_ADDRESS(0xF1EF60, uint16)[((neighboringX & 0x1FE0) << 3) | (neighboringY >> 5)];
+					for (rct_sprite* sprite; sprite_id != 0xFFFF; sprite_id = sprite->unknown.next_in_quadrant) {
+						sprite = &g_sprite_list[sprite_id];
+						if (sprite->unknown.sprite_identifier == SPRITE_IDENTIFIER_PEEP) {
+							rct_peep* other_peep = (rct_peep*)sprite;
+
+							switch (chosenDirection) {
+							case 0:
+								crowd0 += 1;
+								break;
+							case 1:
+								crowd1 += 1;
+								break;
+							case 2:
+								crowd2 += 1;
+								break;
+							case 3:
+								crowd3 += 1;
+								break;
+							}
+							continue;
+						}
+					}
+				}
+			}
+			crowd0 = crowd0 / crowdToleranceThreshold;
+			crowd1 = crowd1 / crowdToleranceThreshold;
+			crowd2 = crowd2 / crowdToleranceThreshold;
+			crowd3 = crowd3 / crowdToleranceThreshold;
+
+			//Finding least populated edge
+			//Ignore option of turning around; In event of tie, default to continuing forward in current direction
+			if ((1) == (1 << peep->var_78)) { //current direction 0001
+				if ((crowd1 < crowd0)) {
+					if ((crowd3 < crowd1)) {
+						return peep_move_one_tile((1 << 3), peep);
+					}
+					return peep_move_one_tile(1 << 1, peep);
+				}
+				if ((crowd3 < crowd0)) {
+					return peep_move_one_tile((1 << 3), peep);
+				}
+				return peep_move_one_tile(1, peep);
+			}
+			if ((1 << 1) == (1 << peep->var_78)) { //current direction 0010
+				if ((crowd0 < crowd1)) {
+					if ((crowd2 < crowd0)) {
+						return peep_move_one_tile((1 << 2), peep);
+					}
+					return peep_move_one_tile(1, peep);
+				}
+				if ((crowd2 < crowd1)) {
+					return peep_move_one_tile((1 << 2), peep);
+				}
+				return peep_move_one_tile((1 << 1), peep);
+			}
+			if ((1 << 2) == (1 << peep->var_78)) { //current direction 0100
+				if ((crowd1 < crowd2)) {
+					if ((crowd3 < crowd1)) {
+						return peep_move_one_tile((1 << 3), peep);
+					}
+					return peep_move_one_tile((1 << 1), peep);
+				}
+				if ((crowd3 < crowd2)) {
+					return peep_move_one_tile((1 << 3), peep);
+				}
+				return peep_move_one_tile((1 << 2), peep);
+			}
+			if ((1 << 3) == (1 << peep->var_78)) { //current direction 1000
+				if ((crowd2 < crowd3)) {
+					if ((crowd0 < crowd2)) {
+						return peep_move_one_tile((1 << 2), peep);
+					}
+					return peep_move_one_tile(1, peep);
+				}
+				if ((crowd0 < crowd3)) {
+					return peep_move_one_tile(1 << 2, peep);
+				}
+				return peep_move_one_tile((1 << 3), peep);
+			}
+		}
+	}
+
+	//Legacy pathfinding
 	if (scenario_rand() & 1){
 		// If possible go straight
 		if (edges & (1 << peep->var_78)){
