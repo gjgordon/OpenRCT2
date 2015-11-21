@@ -32,10 +32,15 @@
 #include "../localisation/currency.h"
 #include "../config.h"
 #include "platform.h"
+#include "../util/util.h"
 #include <dirent.h>
+#include <fnmatch.h>
+#include <time.h>
 
 // The name of the mutex used to prevent multiple instances of the game from running
 #define SINGLE_INSTANCE_MUTEX_NAME "RollerCoaster Tycoon 2_GSKMUTEX"
+
+utf8 _userDataDirectoryPath[MAX_PATH] = { 0 };
 
 /**
  * The function that is called directly from the host application (rct2.exe)'s WinMain. This will be removed when OpenRCT2 can
@@ -57,6 +62,31 @@ int main(int argc, const char **argv)
 	return gExitCode;
 }
 
+void platform_get_date(rct2_date *out_date)
+{
+	assert(out_date != NULL);
+	time_t rawtime;
+	struct tm * timeinfo;
+	time(&rawtime);
+	timeinfo = gmtime(&rawtime);
+	out_date->day = timeinfo->tm_mday;
+	out_date->month = timeinfo->tm_mon;
+	out_date->year = timeinfo->tm_year;
+	out_date->day_of_week = timeinfo->tm_wday;
+}
+
+void platform_get_time(rct2_time *out_time)
+{
+	assert(out_time != NULL);
+	time_t rawtime;
+	struct tm * timeinfo;
+	time(&rawtime);
+	timeinfo = gmtime(&rawtime);
+	out_time->second = timeinfo->tm_sec;
+	out_time->minute = timeinfo->tm_min;
+	out_time->hour = timeinfo->tm_hour;
+}
+
 char platform_get_path_separator()
 {
 	return '/';
@@ -70,7 +100,7 @@ bool platform_file_exists(const utf8 *path)
 	wcstombs(buffer, wPath, len);
 	buffer[len] = '\0';
 	free(wPath);
-	int exists = access(buffer, F_OK) != -1;
+	bool exists = access(buffer, F_OK) != -1;
 	log_warning("file '%s' exists = %i", buffer, exists);
 	return exists;
 }
@@ -88,9 +118,9 @@ bool platform_directory_exists(const utf8 *path)
 	log_verbose("checking dir %s, result = %d, is_dir = %d", buffer, result, S_ISDIR(dirinfo.st_mode));
 	if ((result != 0) || !S_ISDIR(dirinfo.st_mode))
 	{
-		return 0;
+		return false;
 	}
-	return 1;
+	return true;
 }
 
 bool platform_original_game_data_exists(const utf8 *path)
@@ -102,7 +132,7 @@ bool platform_original_game_data_exists(const utf8 *path)
 	buffer[len] = '\0';
 	free(wPath);
 	char checkPath[MAX_PATH];
-	sprintf(checkPath, "%s%c%s%c%s", buffer, platform_get_path_separator(), "data", platform_get_path_separator(), "g1.dat");
+	sprintf(checkPath, "%s%c%s%c%s", buffer, platform_get_path_separator(), "Data", platform_get_path_separator(), "g1.dat");
 	return platform_file_exists(checkPath);
 }
 
@@ -133,13 +163,13 @@ bool platform_ensure_directory_exists(const utf8 *path)
 bool platform_directory_delete(const utf8 *path)
 {
 	STUB();
-	return 1;
+	return true;
 }
 
 bool platform_lock_single_instance()
 {
 	STUB();
-	return 1;
+	return true;
 }
 
 typedef struct {
@@ -169,7 +199,7 @@ static int winfilter(const struct dirent *d)
 		name_upper[i] = (char)toupper(d->d_name[i]);
 	}
 	name_upper[entry_length] = '\0';
-	bool match = strstr(name_upper, g_file_pattern) != NULL;
+	bool match = fnmatch(g_file_pattern, name_upper, FNM_PATHNAME) == 0;
 	//log_warning("trying matching filename %s, result = %d", name_upper, match);
 	free(name_upper);
 	return match;
@@ -177,14 +207,13 @@ static int winfilter(const struct dirent *d)
 
 int platform_enumerate_files_begin(const utf8 *pattern)
 {
-	int i;
 	enumerate_file_info *enumFileInfo;
 	wchar_t *wpattern = utf8_to_widechar(pattern);
 	int length = min(utf8_length(pattern), MAX_PATH);
-	char *npattern = malloc(length);
+	char *npattern = malloc(length+1);
 	int converted;
 	converted = wcstombs(npattern, wpattern, length);
-	npattern[length - 1] = '\0';
+	npattern[length] = '\0';
 	if (converted == MAX_PATH) {
 		log_warning("truncated string %s", npattern);
 	}
@@ -201,49 +230,19 @@ int platform_enumerate_files_begin(const utf8 *pattern)
 		dir_name = strdup(".");
 	}
 
-	char *smatch = strchr(file_name, '*');
-	if ((smatch != file_name) && (smatch != NULL))
-	{
-		log_error("Sorry, can only match '*' at start of filename.");
-		return -1;
-	} else {
-		// '*' found
-		if (smatch != NULL)
-		{
-			// some boundary checking needed
-			// skip the '*'
-			smatch = &smatch[1];
-			char *match2 = strchr(&smatch[1], '*');
-			if (match2 != NULL)
-			{
-				log_error("Sorry, can only match one '*' wildcard.");
-				return -1;
-			}
-		} else {
-			// '*' not found
-			smatch = file_name;
-		}
-	}
-	char *qmatch = strchr(file_name, '?');
-	if ((qmatch != &npattern[length - 1]) && (qmatch != NULL))
-	{
-		log_error("Sorry, can only match '?' at end of filename.");
-		return -1;
-	} else {
-		qmatch = &npattern[length];
-	}
-	int pattern_length = qmatch - smatch;
-	g_file_pattern = strndup(smatch, pattern_length);
+
+	int pattern_length = strlen(file_name);
+	g_file_pattern = strndup(file_name, pattern_length);
 	for (int j = 0; j < pattern_length; j++)
 	{
 		g_file_pattern[j] = (char)toupper(g_file_pattern[j]);
 	}
 	log_warning("looking for file matching %s", g_file_pattern);
 	int cnt;
-	for (i = 0; i < countof(_enumerateFileInfoList); i++) {
+	for (int i = 0; i < countof(_enumerateFileInfoList); i++) {
 		enumFileInfo = &_enumerateFileInfoList[i];
 		if (!enumFileInfo->active) {
-			strncpy(enumFileInfo->pattern, npattern, length);
+			safe_strncpy(enumFileInfo->pattern, npattern, sizeof(enumFileInfo->pattern));
 			cnt = scandir(dir_name, &enumFileInfo->fileListTemp, winfilter, alphasort);
 			if (cnt < 0)
 			{
@@ -291,13 +290,15 @@ int platform_enumerate_files_begin(const utf8 *pattern)
 
 bool platform_enumerate_files_next(int handle, file_info *outFileInfo)
 {
+
+	if (handle < 0)
+	{
+		return false;
+	}
+	enumerate_file_info *enumFileInfo = &_enumerateFileInfoList[handle];
 	bool result;
-	enumerate_file_info *enumFileInfo;
 
-	enumFileInfo = &_enumerateFileInfoList[handle];
-
-	log_verbose("handle = %d", handle);
-	if ((handle >= 0) && (enumFileInfo->handle < enumFileInfo->cnt)) {
+	if (enumFileInfo->handle < enumFileInfo->cnt) {
 		result = true;
 	} else {
 		result = false;
@@ -312,29 +313,26 @@ bool platform_enumerate_files_next(int handle, file_info *outFileInfo)
 		statRes = stat(fileName, &fileInfo);
 		if (statRes == -1) {
 			log_error("failed to stat file '%s'! errno = %i", fileName, errno);
-			return 0;
+			return false;
 		}
 		outFileInfo->path = basename(fileName);
 		outFileInfo->size = fileInfo.st_size;
 		outFileInfo->last_modified = fileInfo.st_mtime;
-		return 1;
+		return true;
 	} else {
-		return 0;
+		return false;
 	}
 }
 
 void platform_enumerate_files_end(int handle)
 {
-	int i;
-	enumerate_file_info *enumFileInfo;
-
 	if (handle < 0)
 	{
 		return;
 	}
-	enumFileInfo = &_enumerateFileInfoList[handle];
+	enumerate_file_info *enumFileInfo = &_enumerateFileInfoList[handle];
 	int cnt = enumFileInfo->cnt;
-	for (i = 0; i < cnt; i++) {
+	for (int i = 0; i < cnt; i++) {
 		free(enumFileInfo->fileListTemp[i]);
 		free(enumFileInfo->paths[i]);
 	}
@@ -348,8 +346,11 @@ void platform_enumerate_files_end(int handle)
 
 static int dirfilter(const struct dirent *d)
 {
-#ifdef _DIRENT_HAVE_D_TYPE
-	if (d->d_type != DT_DIR)
+	if (d->d_name[0] == '.') {
+		return 0;
+	}
+#if defined(_DIRENT_HAVE_D_TYPE) || defined(DT_UNKNOWN)
+	if (d->d_type == DT_DIR)
 	{
 		return 1;
 	} else {
@@ -357,19 +358,18 @@ static int dirfilter(const struct dirent *d)
 	}
 #else
 #error implement dirfilter!
-#endif // _DIRENT_HAVE_D_TYPE
+#endif // defined(_DIRENT_HAVE_D_TYPE) || defined(DT_UNKNOWN)
 }
 
 int platform_enumerate_directories_begin(const utf8 *directory)
 {
-	int i;
 	enumerate_file_info *enumFileInfo;
 	wchar_t *wpattern = utf8_to_widechar(directory);
 	int length = min(utf8_length(directory), MAX_PATH);
-	char *npattern = malloc(length);
+	char *npattern = malloc(length+1);
 	int converted;
 	converted = wcstombs(npattern, wpattern, length);
-	npattern[length - 1] = '\0';
+	npattern[length] = '\0';
 	if (converted == MAX_PATH) {
 		log_warning("truncated string %s", npattern);
 	}
@@ -378,10 +378,10 @@ int platform_enumerate_directories_begin(const utf8 *directory)
 	// TODO: add some checking for stringness and directoryness
 
 	int cnt;
-	for (i = 0; i < countof(_enumerateFileInfoList); i++) {
+	for (int i = 0; i < countof(_enumerateFileInfoList); i++) {
 		enumFileInfo = &_enumerateFileInfoList[i];
 		if (!enumFileInfo->active) {
-			strncpy(enumFileInfo->pattern, npattern, length);
+			safe_strncpy(enumFileInfo->pattern, npattern, length);
 			cnt = scandir(npattern, &enumFileInfo->fileListTemp, dirfilter, alphasort);
 			if (cnt < 0)
 			{
@@ -423,13 +423,16 @@ int platform_enumerate_directories_begin(const utf8 *directory)
 
 bool platform_enumerate_directories_next(int handle, utf8 *path)
 {
-	bool result;
-	enumerate_file_info *enumFileInfo;
+	if (handle < 0)
+	{
+		return false;
+	}
 
-	enumFileInfo = &_enumerateFileInfoList[handle];
+	bool result;
+	enumerate_file_info *enumFileInfo = &_enumerateFileInfoList[handle];
 
 	log_verbose("handle = %d", handle);
-	if ((handle >= 0) && (enumFileInfo->handle < enumFileInfo->cnt)) {
+	if (enumFileInfo->handle < enumFileInfo->cnt) {
 		result = true;
 	} else {
 		result = false;
@@ -438,36 +441,32 @@ bool platform_enumerate_directories_next(int handle, utf8 *path)
 	if (result) {
 		int entryIdx = enumFileInfo->handle++;
 		struct stat fileInfo;
-		log_verbose("trying handle %d", entryIdx);
 		char *fileName = enumFileInfo->paths[entryIdx];
 		int statRes;
 		statRes = stat(fileName, &fileInfo);
 		if (statRes == -1) {
 			log_error("failed to stat file '%s'! errno = %i", fileName, errno);
-			return 0;
+			return false;
 		}
-		// so very, very wrong…
-		strncpy(path, basename(fileName), MAX_PATH);
+		// so very, very wrong
+		safe_strncpy(path, basename(fileName), MAX_PATH);
 		strncat(path, "/", MAX_PATH);
 		path[MAX_PATH - 1] = '\0';
-		return 1;
+		return true;
 	} else {
-		return 0;
+		return false;
 	}
 }
 
 void platform_enumerate_directories_end(int handle)
 {
-	int i;
-	enumerate_file_info *enumFileInfo;
-
 	if (handle < 0)
 	{
 		return;
 	}
-	enumFileInfo = &_enumerateFileInfoList[handle];
+	enumerate_file_info *enumFileInfo = &_enumerateFileInfoList[handle];
 	int cnt = enumFileInfo->cnt;
-	for (i = 0; i < cnt; i++) {
+	for (int i = 0; i < cnt; i++) {
 		free(enumFileInfo->fileListTemp[i]);
 		free(enumFileInfo->paths[i]);
 	}
@@ -484,7 +483,7 @@ int platform_get_drives(){
 	return GetLogicalDrives();
 	*/
 	STUB();
-	return 0xff;
+	return 0;
 }
 
 bool platform_file_copy(const utf8 *srcPath, const utf8 *dstPath, bool overwrite)
@@ -503,32 +502,6 @@ bool platform_file_delete(const utf8 *path)
 {
 	STUB();
 	return 0;
-}
-
-void platform_hide_cursor()
-{
-	STUB();
-}
-
-void platform_show_cursor()
-{
-	STUB();
-}
-
-void platform_get_cursor_position(int *x, int *y)
-{
-	STUB();
-}
-
-void platform_set_cursor_position(int x, int y)
-{
-	STUB();
-}
-
-unsigned int platform_get_ticks()
-{
-	STUB();
-	return 100;
 }
 
 wchar_t *regular_to_wchar(const char* src)
@@ -554,8 +527,27 @@ wchar_t *regular_to_wchar(const char* src)
 	return w_buffer;
 }
 
-void platform_get_user_directory(utf8 *outPath, const utf8 *subDirectory)
+/**
+ * Default directory fallback is:
+ *   - (command line argument)
+ *   - $XDG_CONFIG_HOME/.config/OpenRCT2
+ *   - /home/[uid]/.config/OpenRCT2
+ */
+void platform_resolve_user_data_path()
 {
+	const char separator[2] = { platform_get_path_separator(), 0 };
+
+	if (gCustomUserDataPath[0] != 0) {
+		realpath(gCustomUserDataPath, _userDataDirectoryPath);
+
+		// Ensure path ends with separator
+		int len = strlen(_userDataDirectoryPath);
+		if (_userDataDirectoryPath[len - 1] != separator[0]) {
+			strcat(_userDataDirectoryPath, separator);
+		}
+		return;
+	}
+
 	char buffer[MAX_PATH];
 	buffer[0] = '\0';
 	log_verbose("buffer = '%s'", buffer);
@@ -567,16 +559,37 @@ void platform_get_user_directory(utf8 *outPath, const utf8 *subDirectory)
 		log_verbose("homedir was null, used getuid, now is = '%s'", homedir);
 		if (homedir == NULL)
 		{
-			log_error("Couldn't find user home directory");
+			log_fatal("Couldn't find user data directory");
+			exit(-1);
 			return;
 		}
+
+		strncat(buffer, homedir, MAX_PATH);
+		strncat(buffer, separator, MAX_PATH);
+		strncat(buffer, ".config", MAX_PATH);
 	}
-	char separator[2] = { platform_get_path_separator(), 0 };
-	strncat(buffer, homedir, MAX_PATH);
+	else
+	{
+		strncat(buffer, homedir, MAX_PATH);
+	}
 	strncat(buffer, separator, MAX_PATH);
 	strncat(buffer, "OpenRCT2", MAX_PATH);
 	strncat(buffer, separator, MAX_PATH);
-	log_verbose("outPath + OpenRCT2 = '%s'", buffer);
+	log_verbose("OpenRCT2 user data directory = '%s'", buffer);
+	int len = strnlen(buffer, MAX_PATH);
+	wchar_t *w_buffer = regular_to_wchar(buffer);
+	w_buffer[len] = '\0';
+	utf8 *path = widechar_to_utf8(w_buffer);
+	free(w_buffer);
+	safe_strncpy(_userDataDirectoryPath, path, MAX_PATH);
+	free(path);
+}
+
+void platform_get_user_directory(utf8 *outPath, const utf8 *subDirectory)
+{
+	const char separator[2] = { platform_get_path_separator(), 0 };
+	char buffer[MAX_PATH];
+	safe_strncpy(buffer, _userDataDirectoryPath, sizeof(buffer));
 	if (subDirectory != NULL && subDirectory[0] != 0) {
 		log_verbose("adding subDirectory '%s'", subDirectory);
 		strcat(buffer, subDirectory);
@@ -587,7 +600,7 @@ void platform_get_user_directory(utf8 *outPath, const utf8 *subDirectory)
 	w_buffer[len] = '\0';
 	utf8 *path = widechar_to_utf8(w_buffer);
 	free(w_buffer);
-	strcpy(outPath, path);
+	safe_strncpy(outPath, path, MAX_PATH);
 	free(path);
 	log_verbose("outPath + subDirectory = '%s'", buffer);
 }
@@ -664,16 +677,10 @@ uint16 platform_get_locale_language(){
 }
 
 time_t platform_file_get_modified_time(const utf8* path){
-	/*
-	WIN32_FILE_ATTRIBUTE_DATA data;
-	if (!GetFileAttributesEx(path, GetFileExInfoStandard, &data))
-		return 0;
-	ULARGE_INTEGER ull;
-	ull.LowPart = data.ftLastWriteTime.dwLowDateTime;
-	ull.HighPart = data.ftLastWriteTime.dwHighDateTime;
-	return ull.QuadPart / 10000000ULL - 11644473600ULL;
-	*/
-	STUB();
+	struct stat buf;
+	if (stat(path, &buf) == 0) {
+		return buf.st_mtime;
+	}
 	return 100;
 }
 

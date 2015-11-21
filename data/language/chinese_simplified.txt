@@ -2711,11 +2711,11 @@ STR_2697    :???
 STR_2698    :???
 STR_2699    :???
 STR_2700    :Autosave frequency:
-STR_2701    :Every week
-STR_2702    :Every 2 weeks
-STR_2703    :Every month
-STR_2704    :Every 4 months
-STR_2705    :Every year
+STR_2701    :Every minute
+STR_2702    :Every 5 minutes
+STR_2703    :Every 15 minutes
+STR_2704    :Every 30 minutes
+STR_2705    :Every hour
 STR_2706    :Never
 STR_2707    :Open new window
 STR_2708    :{WINDOW_COLOUR_1}Are you sure you want to overwrite {STRINGID}?
@@ -3506,7 +3506,7 @@ STR_5156    :{SMALLFONT}{BLACK}Allows testing of most ride types even when the t
 STR_5157    :Unlock all prices
 STR_5158    :Quit to menu
 STR_5159    :Exit OpenRCT2
-STR_5160    :{MONTH} {STRINGID}, Year {COMMA16}
+STR_5160    :{POP16}{MONTH} {PUSH16}{PUSH16}{STRINGID}, Year {POP16}{COMMA16}
 STR_5161    :Date Format:
 STR_5162    :Day/Month/Year
 STR_5163    :Month/Day/Year

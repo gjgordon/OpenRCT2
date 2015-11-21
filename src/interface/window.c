@@ -181,9 +181,9 @@ void window_update_all()
 	gfx_draw_all_dirty_blocks();
 
 	// 1000 tick update
-	RCT2_GLOBAL(0x009DEB7C, sint16) += RCT2_GLOBAL(0x009DE588, sint16);
-	if (RCT2_GLOBAL(0x009DEB7C, sint16) >= 1000) {
-		RCT2_GLOBAL(0x009DEB7C, sint16) = 0;
+	RCT2_GLOBAL(RCT2_ADDRESS_WINDOW_UPDATE_TICKS, sint16) += RCT2_GLOBAL(RCT2_ADDRESS_TICKS_SINCE_LAST_UPDATE, sint16);
+	if (RCT2_GLOBAL(RCT2_ADDRESS_WINDOW_UPDATE_TICKS, sint16) >= 1000) {
+		RCT2_GLOBAL(RCT2_ADDRESS_WINDOW_UPDATE_TICKS, sint16) = 0;
 		for (w = RCT2_LAST_WINDOW; w >= g_window_list; w--)
 			window_event_unknown_07_call(w);
 	}
@@ -361,7 +361,7 @@ rct_window *window_create(int x, int y, int width, int height, rct_window_event_
 	if (RCT2_NEW_WINDOW >= &(g_window_list[MAX_NUMBER_WINDOWS])) {
 		// Close least recently used window
 		for (w = g_window_list; w < RCT2_NEW_WINDOW; w++)
-			if (!(w->flags & (WF_STICK_TO_BACK | WF_STICK_TO_FRONT | WF_9)))
+			if (!(w->flags & (WF_STICK_TO_BACK | WF_STICK_TO_FRONT | WF_NO_AUTO_CLOSE)))
 				break;
 
 		window_close(w);
@@ -397,7 +397,7 @@ rct_window *window_create(int x, int y, int width, int height, rct_window_event_
 	// Play sounds and flash the window
 	if (!(flags & (WF_STICK_TO_BACK | WF_STICK_TO_FRONT))){
 		w->flags |= WF_WHITE_BORDER_MASK;
-		sound_play_panned(SOUND_WINDOW_OPEN, x + (width / 2), 0, 0, 0);
+		audio_play_sound_panned(SOUND_WINDOW_OPEN, x + (width / 2), 0, 0, 0);
 	}
 
 	w->number = 0;
@@ -820,7 +820,7 @@ rct_window *window_find_from_point(int x, int y)
 		if (x < w->x || x >= w->x + w->width || y < w->y || y >= w->y + w->height)
 			continue;
 
-		if (w->flags & WF_5) {
+		if (w->flags & WF_NO_BACKGROUND) {
 			widget_index = window_find_widget_from_point(w, x, y);
 			if (widget_index == -1)
 				continue;
@@ -1301,7 +1301,7 @@ void window_scroll_to_location(rct_window *w, int x, int y, int z)
 			}
 		}
 
-		rct_xy16 map_coordinate = coordinate_3d_to_2d(&location_3d, RCT2_GLOBAL(RCT2_ADDRESS_CURRENT_ROTATION, uint8));
+		rct_xy16 map_coordinate = coordinate_3d_to_2d(&location_3d, get_current_rotation());
 
 		int i = 0;
 		if (!(RCT2_GLOBAL(RCT2_ADDRESS_SCREEN_FLAGS, uint8) & SCREEN_FLAGS_TITLE_DEMO)) {
@@ -1335,7 +1335,7 @@ void window_scroll_to_location(rct_window *w, int x, int y, int z)
 		}
 		// rct2: 0x006E7C76
 		if (w->viewport_target_sprite == -1) {
-			if (!(w->flags & WF_2)) {
+			if (!(w->flags & WF_NO_SCROLLING)) {
 				w->saved_view_x = map_coordinate.x - (sint16)(w->viewport->view_width * window_scroll_locations[i][0]);
 				w->saved_view_y = map_coordinate.y - (sint16)(w->viewport->view_height * window_scroll_locations[i][1]);
 				w->flags |= WF_SCROLLING_TO_LOCATION;
@@ -1389,7 +1389,7 @@ void window_rotate_camera(rct_window *w, int direction)
 		z = map_element_height(x, y);
 	}
 
-	RCT2_GLOBAL(RCT2_ADDRESS_CURRENT_ROTATION, uint32) = (RCT2_GLOBAL(RCT2_ADDRESS_CURRENT_ROTATION, uint32) + direction) % 4;
+	RCT2_GLOBAL(RCT2_ADDRESS_CURRENT_ROTATION, uint32) = (get_current_rotation() + direction) & 3;
 
 	int new_x, new_y;
 	center_2d_coordinates(x, y, z, &new_x, &new_y, viewport);
@@ -1613,7 +1613,7 @@ void window_draw_widgets(rct_window *w, rct_drawpixelinfo *dpi)
 	rct_widget *widget;
 	int widgetIndex;
 
-	if ((w->flags & WF_TRANSPARENT) && !(w->flags & WF_5))
+	if ((w->flags & WF_TRANSPARENT) && !(w->flags & WF_NO_BACKGROUND))
 		gfx_fill_rect(dpi, w->x, w->y, w->x + w->width - 1, w->y + w->height - 1, 0x2000000 | 51);
 
 	//todo: some code missing here? Between 006EB18C and 006EB260
@@ -2425,7 +2425,7 @@ void textinput_cancel()
 #else
 	log_warning("there should be something called here (0x0040701D)");
 #endif // _WIN32
-	if (RCT2_GLOBAL(0x009DEB8C, uint8) != 255) {
+	if (RCT2_GLOBAL(RCT2_ADDRESS_TEXTINPUT_WINDOWCLASS, uint8) != 255) {
 		RCT2_CALLPROC_EBPSAFE(0x006EE4E2);
 		w = window_find_by_number(
 			RCT2_GLOBAL(RCT2_ADDRESS_TEXTINPUT_WINDOWCLASS, rct_windowclass),

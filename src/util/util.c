@@ -8,12 +8,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- 
+
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- 
+
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *****************************************************************************/
@@ -125,9 +125,7 @@ bool readentirefile(const utf8 *path, void **outBuffer, int *outLength)
 		return 0;
 
 	// Get length
-	SDL_RWseek(fp, 0, RW_SEEK_END);
-	fpLength = (int)SDL_RWtell(fp);
-	SDL_RWseek(fp, 0, RW_SEEK_SET);
+	fpLength = (int)SDL_RWsize(fp);
 
 	// Read whole file into a buffer
 	fpBuffer = malloc(fpLength);
@@ -143,18 +141,23 @@ int bitscanforward(int source)
 {
 	int i;
 
+	#if _MSC_VER >= 1400 // Visual Studio 2005
+		uint8 success = _BitScanForward(&i, source);
+		return success != 0 ? i : -1;
+	#else
 	for (i = 0; i < 32; i++)
-		if (source & (1 << i))
+		if (source & (1u << i))
 			return i;
 
 	return -1;
+	#endif
 }
 
 int bitcount(int source)
 {
 	int result = 0;
 	for (int i = 0; i < 32; i++) {
-		if (source & (1 << i)) {
+		if (source & (1u << i)) {
 			result++;
 		}
 	}
@@ -176,6 +179,36 @@ int strcicmp(char const *a, char const *b)
 		if (d != 0 || !*a)
 			return d;
 	}
+}
+
+char *safe_strncpy(char * destination, const char * source, size_t size)
+{
+	assert(destination != NULL);
+	assert(source != NULL);
+
+	if (size == 0)
+	{
+		return destination;
+	}
+	char *result = destination;
+	bool terminated = false;
+	for (size_t i = 0; i < size; i++)
+	{
+		if (*source != '\0')
+		{
+			*destination++ = *source++;
+		} else {
+			*destination = *source;
+			terminated = true;
+			break;
+		}
+	}
+	if (!terminated)
+	{
+		result[size - 1] = '\0';
+		log_warning("Truncating string %s to %d bytes.", destination, size);
+	}
+	return result;
 }
 
 bool utf8_is_bom(const char *str)

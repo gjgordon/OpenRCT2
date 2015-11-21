@@ -24,6 +24,7 @@
 #include "../cheats.h"
 #include "../common.h"
 #include "../config.h"
+#include "../editor.h"
 #include "../game.h"
 #include "../input.h"
 #include "../interface/window.h"
@@ -125,8 +126,14 @@ static const int RideInspectionInterval[] = {
 	10, 20, 30, 45, 60, 120, 0, 0
 };
 
-rct_ride_type **gRideTypeList = RCT2_ADDRESS(0x009ACFA4, rct_ride_type*);
+rct_ride_type **gRideTypeList = RCT2_ADDRESS(RCT2_ADDRESS_RIDE_ENTRIES, rct_ride_type*);
 rct_ride* g_ride_list = RCT2_ADDRESS(RCT2_ADDRESS_RIDE_LIST, rct_ride);
+bool gGotoStartPlacementMode = false;
+int gRideRemoveTrackPieceCallbackX;
+int gRideRemoveTrackPieceCallbackY;
+int gRideRemoveTrackPieceCallbackZ;
+int gRideRemoveTrackPieceCallbackDirection;
+int gRideRemoveTrackPieceCallbackType;
 
 // Static function declarations
 rct_peep *find_closest_mechanic(int x, int y, int forInspection);
@@ -237,6 +244,27 @@ money32 get_shop_item_cost(int shopItem)
 	return shopItem < 32 ?
 		RCT2_GLOBAL(0x00982164 + (shopItem * 8), uint16) :
 		RCT2_GLOBAL(0x00982144 + (shopItem * 8), uint16);
+}
+
+money16 get_shop_base_value(int shopItem)
+{
+	return shopItem < 32 ?
+		RCT2_GLOBAL((0x00982164 + 2) + (shopItem * 8), uint16) :
+		RCT2_GLOBAL((0x00982144 + 2) + (shopItem * 8), uint16);
+}
+
+money16 get_shop_cold_value(int shopItem)
+{
+	return shopItem < 32 ?
+		RCT2_GLOBAL((0x00982164 + 4) + (shopItem * 8), uint16) :
+		RCT2_GLOBAL((0x00982144 + 4) + (shopItem * 8), uint16);
+}
+
+money16 get_shop_hot_value(int shopItem)
+{
+	return shopItem < 32 ?
+		RCT2_GLOBAL((0x00982164 + 6) + (shopItem * 8), uint16) :
+		RCT2_GLOBAL((0x00982144 + 6) + (shopItem * 8), uint16);
 }
 
 /**
@@ -822,6 +850,7 @@ int ride_create_ride(ride_list_item listItem)
 	ebx = GAME_COMMAND_FLAG_APPLY;
 	edi = 0;
 	esi = 0;
+	ebp = 0;
 
 	RCT2_GLOBAL(RCT2_ADDRESS_GAME_COMMAND_ERROR_TITLE, uint16) = 0x3DC;
 
@@ -879,7 +908,7 @@ static void ride_remove_cable_lift(rct_ride *ride)
 		ride->lifecycle_flags &= ~RIDE_LIFECYCLE_CABLE_LIFT;
 		spriteIndex = ride->cable_lift;
 		do {
-			vehicle = &(g_sprite_list[spriteIndex].vehicle);
+			vehicle = GET_VEHICLE(spriteIndex);
 			invalidate_sprite_2((rct_sprite*)vehicle);
 			sprite_remove((rct_sprite*)vehicle);
 			spriteIndex = vehicle->next_vehicle_on_train;
@@ -904,7 +933,7 @@ static void ride_remove_vehicles(rct_ride *ride)
 		for (i = 0; i < 32; i++) {
 			spriteIndex = ride->vehicles[i];
 			while (spriteIndex != SPRITE_INDEX_NULL) {
-				vehicle = &(g_sprite_list[spriteIndex].vehicle);
+				vehicle = GET_VEHICLE(spriteIndex);
 				invalidate_sprite_2((rct_sprite*)vehicle);
 				sprite_remove((rct_sprite*)vehicle);
 				spriteIndex = vehicle->next_vehicle_on_train;
@@ -1166,11 +1195,12 @@ int sub_6C683D(int* x, int* y, int* z, int direction, int type, uint16 extra_par
 			mapElement->properties.track.colour &= 0x0F;
 			mapElement->properties.track.colour |= (extra_params & 0xFF) << 4;
 		}
+
 		if (flags & (1 << 3)) {
-			mapElement->properties.track.colour |= (1 << 3);
+			track_element_set_cable_lift(mapElement);
 		}
 		if (flags & (1 << 4)) {
-			mapElement->properties.track.colour &= 0xF7;
+			track_element_clear_cable_lift(mapElement);
 		}
 	}
 
@@ -1426,7 +1456,7 @@ void ride_construction_set_default_next_piece()
 		// Set track slope and lift hill
 		_currentTrackSlopeEnd = slope;
 		_previousTrackSlopeEnd = slope;
-		_currentTrackLiftHill = (mapElement->type & 0x80) != 0;
+		_currentTrackLiftHill = track_element_is_lift_hill(mapElement);
 		break;
 	}
 }
@@ -1639,8 +1669,8 @@ int ride_modify(rct_xy_element *input)
 		return 0;
 	}
 
-	ride_clear_for_construction(rideIndex);
-	ride_remove_peeps(rideIndex);
+	// Stop the ride again to clear all vehicles and peeps (compatible with network games)
+	ride_set_status(rideIndex, RIDE_STATUS_CLOSED);
 
 	// Check if element is a station entrance or exit
 	if (map_element_get_type(mapElement.element) == MAP_ELEMENT_TYPE_ENTRANCE)
@@ -1776,7 +1806,7 @@ void ride_update_all()
 
 	// Remove all rides if scenario editor
 	if (RCT2_GLOBAL(RCT2_ADDRESS_SCREEN_FLAGS, uint8) & SCREEN_FLAGS_SCENARIO_EDITOR) {
-		if (s6Info->var_000 <= 2)
+		if (s6Info->editor_step <= EDITOR_STEP_INVENTIONS_LIST_SET_UP)
 			FOR_ALL_RIDES(i, ride)
 				ride->type = RIDE_TYPE_NULL;
 		return;
@@ -1852,7 +1882,7 @@ static void ride_update(int rideIndex)
 
 	if (ride->status == RIDE_STATUS_TESTING && gConfigGeneral.no_test_crashes) {
 		for (int i = 0; i < ride->num_vehicles; i++) {
-			rct_vehicle *vehicle = &(g_sprite_list[ride->vehicles[i]].vehicle);
+			rct_vehicle *vehicle = GET_VEHICLE(ride->vehicles[i]);
 
 			if (vehicle->status == VEHICLE_STATUS_CRASHED || vehicle->status == VEHICLE_STATUS_CRASHING) {
 				ride_set_status(rideIndex, RIDE_STATUS_CLOSED);
@@ -1964,7 +1994,7 @@ static void ride_spiral_slide_update(rct_ride *ride)
 		z = ride->station_heights[i];
 
 		mapElement = ride_get_station_start_track_element(ride, i);
-		int rotation = ((mapElement->type & 3) << 2) | RCT2_GLOBAL(RCT2_ADDRESS_CURRENT_ROTATION, uint8);
+		int rotation = ((mapElement->type & 3) << 2) | get_current_rotation();
 		x *= 32;
 		y *= 32;
 		x += RCT2_GLOBAL(0x0098DDB8 + (rotation * 4), sint16);
@@ -2219,18 +2249,18 @@ void ride_prepare_breakdown(int rideIndex, int breakdownReason)
 		ride->broken_car = scenario_rand() % ride->num_cars_per_train;
 
 		// Set flag on broken car
-		vehicle = &(g_sprite_list[ride->vehicles[ride->broken_vehicle]].vehicle);
+		vehicle = GET_VEHICLE(ride->vehicles[ride->broken_vehicle]);
 		for (i = ride->broken_car; i > 0; i--) {
 			if (vehicle->next_vehicle_on_train == (uint16)0xFFFFFFFF) {
 				vehicle = NULL;
 				break;
 			}
 			else {
-				vehicle = &(g_sprite_list[vehicle->next_vehicle_on_train].vehicle);
+				vehicle = GET_VEHICLE(vehicle->next_vehicle_on_train);
 			}
 		}
 		if (vehicle != NULL)
-			vehicle->var_48 |= 0x100;
+			vehicle->update_flags |= VEHICLE_UPDATE_FLAG_BROKEN_CAR;
 		break;
 	case BREAKDOWN_VEHICLE_MALFUNCTION:
 		// Choose a random train
@@ -2238,8 +2268,8 @@ void ride_prepare_breakdown(int rideIndex, int breakdownReason)
 		ride->broken_car = 0;
 
 		// Set flag on broken train, first car
-		vehicle = &(g_sprite_list[ride->vehicles[ride->broken_vehicle]].vehicle);
-		vehicle->var_48 |= 0x200;
+		vehicle = GET_VEHICLE(ride->vehicles[ride->broken_vehicle]);
+		vehicle->update_flags |= VEHICLE_UPDATE_FLAG_BROKEN_TRAIN;
 		break;
 	case BREAKDOWN_BRAKES_FAILURE:
 		// Original code generates a random number but does not use it
@@ -2565,7 +2595,7 @@ static void ride_music_update(int rideIndex)
 	}
 
 	if (ride->type == RIDE_TYPE_CIRCUS_SHOW) {
-		vehicle = &(g_sprite_list[ride->vehicles[0]].vehicle);
+		vehicle = GET_VEHICLE(ride->vehicles[0]);
 		if (vehicle->status != VEHICLE_STATUS_DOING_CIRCUS_SHOW) {
 			ride->music_tune_id = 255;
 			return;
@@ -2649,14 +2679,14 @@ void ride_measurement_update(rct_ride_measurement *measurement)
 	uint16 spriteIndex;
 	rct_ride *ride;
 	rct_vehicle *vehicle;
-	int unk, velocity, altitude, verticalG, lateralG;
+	int velocity, altitude, verticalG, lateralG;
 
 	ride = GET_RIDE(measurement->ride_index);
 	spriteIndex = ride->vehicles[measurement->vehicle_index];
 	if (spriteIndex == SPRITE_INDEX_NULL)
 		return;
 
-	vehicle = &(g_sprite_list[spriteIndex].vehicle);
+	vehicle = GET_VEHICLE(spriteIndex);
 
 	if (measurement->flags & RIDE_MEASUREMENT_FLAG_UNLOADING) {
 		if (vehicle->status != VEHICLE_STATUS_DEPARTING && vehicle->status != VEHICLE_STATUS_STOPPING)
@@ -2672,8 +2702,8 @@ void ride_measurement_update(rct_ride_measurement *measurement)
 		return;
 	}
 
-	unk = (vehicle->var_36 / 4) & 0xFF;
-	if (unk == 216 || unk == 123 || unk == 9 || unk == 63 || unk == 147 || unk == 155)
+	uint8 trackType = (vehicle->track_type >> 2) & 0xFF;
+	if (trackType == 216 || trackType == 123 || trackType == 9 || trackType == 63 || trackType == 147 || trackType == 155)
 		if (vehicle->velocity == 0)
 			return;
 
@@ -2744,7 +2774,7 @@ void ride_measurements_update()
 				if (spriteIndex == SPRITE_INDEX_NULL)
 					continue;
 
-				vehicle = &(g_sprite_list[spriteIndex].vehicle);
+				vehicle = GET_VEHICLE(spriteIndex);
 				if (vehicle->status == VEHICLE_STATUS_DEPARTING || vehicle->status == VEHICLE_STATUS_STOPPING) {
 					measurement->vehicle_index = j;
 					measurement->current_station = vehicle->current_station;
@@ -2845,7 +2875,7 @@ rct_ride_measurement *ride_get_measurement(int rideIndex, rct_string_id *message
 		if (message != NULL) *message = 0;
 		return measurement;
 	} else {
-		RCT2_GLOBAL(0x013CE952, uint16) = RideNameConvention[ride->type].vehicle_name;
+		RCT2_GLOBAL(RCT2_ADDRESS_COMMON_FORMAT_ARGS, uint16) = RideNameConvention[ride->type].vehicle_name;
 		RCT2_GLOBAL(0x013CE952 + 2, uint16) = RideNameConvention[ride->type].station_name;
 		if (message != NULL) *message = STR_DATA_LOGGING_WILL_START_WHEN_NEXT_LEAVES;
 		return NULL;
@@ -2998,7 +3028,7 @@ static void ride_entrance_exit_connected(rct_ride* ride, int ride_idx)
 			continue;
 		if (entrance != 0xFFFF && !ride_entrance_exit_is_reachable(entrance, ride, i)) {
 			// name of ride is parameter of the format string
-			RCT2_GLOBAL(0x013CE952, uint16) = ride->name;
+			RCT2_GLOBAL(RCT2_ADDRESS_COMMON_FORMAT_ARGS, uint16) = ride->name;
 			RCT2_GLOBAL(0x013CE954, uint32) = ride->name_arguments;
 			news_item_add_to_queue(1, STR_ENTRANCE_NOT_CONNECTED, ride_idx);
 			ride->connected_message_throttle = 3;
@@ -3006,7 +3036,7 @@ static void ride_entrance_exit_connected(rct_ride* ride, int ride_idx)
 
 		if (exit != 0xFFFF && !ride_entrance_exit_is_reachable(exit, ride, i)) {
 			// name of ride is parameter of the format string
-			RCT2_GLOBAL(0x013CE952, uint16) = ride->name;
+			RCT2_GLOBAL(RCT2_ADDRESS_COMMON_FORMAT_ARGS, uint16) = ride->name;
 			RCT2_GLOBAL(0x013CE954, uint32) = ride->name_arguments;
 			news_item_add_to_queue(1, STR_EXIT_NOT_CONNECTED, ride_idx);
 			ride->connected_message_throttle = 3;
@@ -3072,7 +3102,7 @@ static void ride_shop_connected(rct_ride* ride, int ride_idx)
 	}
 
 	// Name of ride is parameter of the format string
-	RCT2_GLOBAL(0x013CE952, uint16) = ride->name;
+	RCT2_GLOBAL(RCT2_ADDRESS_COMMON_FORMAT_ARGS, uint16) = ride->name;
 	RCT2_GLOBAL(0x013CE954, uint32) = ride->name_arguments;
 	news_item_add_to_queue(1, STR_ENTRANCE_NOT_CONNECTED, ride_idx);
 
@@ -3209,7 +3239,7 @@ int ride_music_params_update(sint16 x, sint16 y, sint16 z, uint8 rideIndex, uint
 		RCT2_GLOBAL(0x009AF47C, uint16) = sampleRate;
 		sint16 v11;
 		sint16 v12;
-		switch (RCT2_GLOBAL(RCT2_ADDRESS_CURRENT_ROTATION, uint32)) {
+		switch (get_current_rotation()) {
 			case 0:
 				v11 = y - x;
 				v12 = ((y + x) / 2) - z;
@@ -3248,7 +3278,7 @@ int ride_music_params_update(sint16 x, sint16 y, sint16 z, uint8 rideIndex, uint
 		if (screenwidth < 64) {
 			screenwidth = 64;
 		}
-		int panx = ((x2 / screenwidth) - 0x8000) >> 4;
+		int pan_x = ((x2 / screenwidth) - 0x8000) >> 4;
 
 		int y2 = RCT2_GLOBAL(0x00F438A4, rct_viewport*)->y + ((RCT2_GLOBAL(0x009AF5A2, sint16) - RCT2_GLOBAL(0x00F438A4, rct_viewport*)->view_y) >> RCT2_GLOBAL(0x00F438A4, rct_viewport*)->zoom);
 		y2 <<= 16;
@@ -3256,12 +3286,12 @@ int ride_music_params_update(sint16 x, sint16 y, sint16 z, uint8 rideIndex, uint
 		if (screenheight < 64) {
 			screenheight = 64;
 		}
-		int pany = ((y2 / screenheight) - 0x8000) >> 4;
+		int pan_y = ((y2 / screenheight) - 0x8000) >> 4;
 
 		uint8 vol1 = -1;
 		uint8 vol2 = -1;
-		int panx2 = panx;
-		int pany2 = pany;
+		int panx2 = pan_x;
+		int pany2 = pan_y;
 		if (pany2 < 0) {
 			pany2 = -pany2;
 		}
@@ -3301,23 +3331,20 @@ int ride_music_params_update(sint16 x, sint16 y, sint16 z, uint8 rideIndex, uint
 		}
 		int v32 = -(((uint8)(-vol1 - 1) * (uint8)(-vol1 - 1)) / 16) - 700;
 		if (vol1 && v32 >= -4000) {
-			if (panx > 10000) {
-				panx = 10000;
+			if (pan_x > 10000) {
+				pan_x = 10000;
 			}
-			if (panx < -10000) {
-				panx = -10000;
+			if (pan_x < -10000) {
+				pan_x = -10000;
 			}
-			if (!RCT2_GLOBAL(0x009AAC6D, uint8)) {
-				panx = 0;
-			}
-			rct_ride_music* ride_music = &gRideMusicList[0];//&RCT2_GLOBAL(0x009AF46C, rct_ride_music);
+			rct_ride_music* ride_music = &gRideMusicList[0];
 			int channel = 0;
 			uint32 a1;
-			while (ride_music->rideid != rideIndex || ride_music->tuneid != *tuneId) {
+			while (ride_music->ride_id != rideIndex || ride_music->tune_id != *tuneId) {
 				ride_music++;
 				channel++;
 				if (channel >= AUDIO_MAX_RIDE_MUSIC) {
-					rct_ride_music_info* ride_music_info = ride_music_info_list[*tuneId];
+					rct_ride_music_info* ride_music_info = gRideMusicInfoList[*tuneId];
 					a1 = position + ride_music_info->offset;
 					goto label51;
 				}
@@ -3329,17 +3356,17 @@ int ride_music_params_update(sint16 x, sint16 y, sint16 z, uint8 rideIndex, uint
 			}
 			a1 = Mixer_Channel_GetOffset(gRideMusicList[channel].sound_channel);
 		label51:
-			if (a1 < ride_music_info_list[*tuneId]->length) {
+			if (a1 < gRideMusicInfoList[*tuneId]->length) {
 				position = a1;
-				rct_ride_music_params* ride_music_params = gRideMusicParamsListEnd;//RCT2_GLOBAL(0x009AF42C, rct_ride_music_params*);
-				if (ride_music_params < &gRideMusicParamsList[AUDIO_MAX_RIDE_MUSIC]/*(rct_ride_music_params*)0x009AF46C*/) {
-					ride_music_params->rideid = rideIndex;
-					ride_music_params->tuneid = *tuneId;
+				rct_ride_music_params* ride_music_params = gRideMusicParamsListEnd;
+				if (ride_music_params < &gRideMusicParamsList[AUDIO_MAX_RIDE_MUSIC]) {
+					ride_music_params->ride_id = rideIndex;
+					ride_music_params->tune_id = *tuneId;
 					ride_music_params->offset = a1;
 					ride_music_params->volume = v32;
-					ride_music_params->pan = panx;
-					ride_music_params->freq = RCT2_GLOBAL(0x009AF47C, uint16);
-					gRideMusicParamsListEnd++;//RCT2_GLOBAL(0x009AF42C, rct_ride_music_params*)++;
+					ride_music_params->pan = pan_x;
+					ride_music_params->frequency = RCT2_GLOBAL(0x009AF47C, uint16);
+					gRideMusicParamsListEnd++;
 				}
 			} else {
 				*tuneId = 0xFF;
@@ -3348,7 +3375,7 @@ int ride_music_params_update(sint16 x, sint16 y, sint16 z, uint8 rideIndex, uint
 		} else {
 		label58:
 			;
-			rct_ride_music_info* ride_music_info = ride_music_info_list[*tuneId];
+			rct_ride_music_info* ride_music_info = gRideMusicInfoList[*tuneId];
 			position += ride_music_info->offset;
 			if (position < ride_music_info->length) {
 				return position;
@@ -3361,10 +3388,10 @@ int ride_music_params_update(sint16 x, sint16 y, sint16 z, uint8 rideIndex, uint
 	return position;
 }
 
-#define INIT_MUSIC_INFO(pathid, offset, length, unknown) (rct_ride_music_info[]){length, offset, pathid, unknown}
+#define INIT_MUSIC_INFO(path_id, offset, length, unknown) (rct_ride_music_info[]){length, offset, path_id, unknown}
 
 //0x009AF1C8
-rct_ride_music_info* ride_music_info_list[NUM_DEFAULT_MUSIC_TRACKS] = {
+rct_ride_music_info* gRideMusicInfoList[NUM_DEFAULT_MUSIC_TRACKS] = {
 	INIT_MUSIC_INFO(PATH_ID_CSS4, 1378, 8139054, 0),
 	INIT_MUSIC_INFO(PATH_ID_CSS5, 1378, 7796656, 0),
 	INIT_MUSIC_INFO(PATH_ID_CSS6, 1378, 15787850, 0),
@@ -3422,124 +3449,120 @@ void ride_music_update_final()
 	rct_ride_music_params* edi = NULL;
 	int ebx;
 	if (!(RCT2_GLOBAL(RCT2_ADDRESS_SCREEN_FLAGS, uint8) & 2)) {
-		if ((RCT2_GLOBAL(0x009AF284, uint32) & (1 << 0))) {
-			if (!gGameSoundsOff && gConfigSound.sound && gConfigSound.ride_music && !(RCT2_GLOBAL(RCT2_ADDRESS_SCREEN_FLAGS, uint8) & 1)) {
-				// set to stop music if volume <= 1 ?
-				while (1) {
-					int v8 = 0;
-					int v9 = 1;
-					rct_ride_music_params* ride_music_params = &gRideMusicParamsList[0];//&RCT2_GLOBAL(0x009AF430, rct_ride_music_params);
-					while (ride_music_params < gRideMusicParamsListEnd/*RCT2_GLOBAL(0x009AF42C, rct_ride_music_params*)*/) {
-						if (ride_music_params->rideid != (uint8)-1) {
-							rct_ride_music_info* ride_music_info = ride_music_info_list[ride_music_params->tuneid];
-							if (RCT2_ADDRESS(0x009AA0B1, uint8*)[ride_music_info->pathid]) { // file_on_cdrom[]
-								v8++;
-								if (v9 >= ride_music_params->volume) {
-									v9 = ride_music_params->volume;
-									edi = ride_music_params;
-								}
-							}
-						}
-						ride_music_params++;
-					}
-					if (v8 <= 1) {
-						break;
-					}
-					edi->rideid = -1;
-				}
-				while (1) {
-					int v8 = 0;
-					int v9 = 1;
-					rct_ride_music_params* ride_music_params = &gRideMusicParamsList[0];//&RCT2_GLOBAL(0x009AF430, rct_ride_music_params);
-					while (ride_music_params < gRideMusicParamsListEnd/*RCT2_GLOBAL(0x009AF42C, rct_ride_music_params*)*/) {
-						if (ride_music_params->rideid != (uint8)-1) {
+		if (!gGameSoundsOff && gConfigSound.sound && gConfigSound.ride_music && !(RCT2_GLOBAL(RCT2_ADDRESS_SCREEN_FLAGS, uint8) & 1)) {
+			// set to stop music if volume <= 1 ?
+			while (1) {
+				int v8 = 0;
+				int v9 = 1;
+				rct_ride_music_params* ride_music_params = &gRideMusicParamsList[0];
+				while (ride_music_params < gRideMusicParamsListEnd) {
+					if (ride_music_params->ride_id != (uint8)-1) {
+						rct_ride_music_info* ride_music_info = gRideMusicInfoList[ride_music_params->tune_id];
+						if (RCT2_ADDRESS(0x009AA0B1, uint8*)[ride_music_info->path_id]) { // file_on_cdrom[]
 							v8++;
 							if (v9 >= ride_music_params->volume) {
 								v9 = ride_music_params->volume;
 								edi = ride_music_params;
 							}
 						}
+					}
+					ride_music_params++;
+				}
+				if (v8 <= 1) {
+					break;
+				}
+				edi->ride_id = -1;
+			}
+			while (1) {
+				int v8 = 0;
+				int v9 = 1;
+				rct_ride_music_params* ride_music_params = &gRideMusicParamsList[0];
+				while (ride_music_params < gRideMusicParamsListEnd) {
+					if (ride_music_params->ride_id != (uint8)-1) {
+						v8++;
+						if (v9 >= ride_music_params->volume) {
+							v9 = ride_music_params->volume;
+							edi = ride_music_params;
+						}
+					}
+					ride_music_params++;
+				}
+				if (v8 <= 2) {
+					break;
+				}
+				edi->ride_id = -1;
+			}
+
+			// stop currently playing music that is not in music params list or not playing?
+			rct_ride_music* ride_music = &gRideMusicList[0];
+			int channel = 0;
+			do {
+				if (ride_music->ride_id != (uint8)-1) {
+					rct_ride_music_params* ride_music_params = &gRideMusicParamsList[0];
+					while (ride_music_params < gRideMusicParamsListEnd) {
+						if (ride_music_params->ride_id == ride_music->ride_id && ride_music_params->tune_id == ride_music->tune_id) {
+							int isplaying = Mixer_Channel_IsPlaying(gRideMusicList[channel].sound_channel);
+							if (isplaying) {
+								goto label32;
+							}
+							break;
+						}
 						ride_music_params++;
 					}
-					if (v8 <= 2) {
-						break;
-					}
-					edi->rideid = -1;
+					Mixer_Stop_Channel(gRideMusicList[channel].sound_channel);
+					ride_music->ride_id = -1;
 				}
+			label32:
+				ride_music++;
+				channel++;
+			} while(channel < AUDIO_MAX_RIDE_MUSIC);
 
-				// stop currently playing music that is not in music params list or not playing?
-				rct_ride_music* ride_music = &gRideMusicList[0];//&RCT2_GLOBAL(0x009AF46C, rct_ride_music);
-				int channel = 0;
-				do {
-					if (ride_music->rideid != (uint8)-1) {
-						rct_ride_music_params* ride_music_params = &gRideMusicParamsList[0];//&RCT2_GLOBAL(0x009AF430, rct_ride_music_params);
-						while (ride_music_params < gRideMusicParamsListEnd/*RCT2_GLOBAL(0x009AF42C, rct_ride_music_params*)*/) {
-							if (ride_music_params->rideid == ride_music->rideid && ride_music_params->tuneid == ride_music->tuneid) {
-								int isplaying = Mixer_Channel_IsPlaying(gRideMusicList[channel].sound_channel);
-								if (isplaying) {
-									goto label32;
+			for (rct_ride_music_params* ride_music_params = &gRideMusicParamsList[0]; ride_music_params < gRideMusicParamsListEnd; ride_music_params++) {
+				if (ride_music_params->ride_id != (uint8)-1) {
+					rct_ride_music* ride_music = &gRideMusicList[0];
+					int channel = 0;
+					while (ride_music_params->ride_id != ride_music->ride_id || ride_music_params->tune_id != ride_music->tune_id) {
+						if (ride_music->ride_id == (uint8)-1) {
+							ebx = channel;
+						}
+						ride_music++;
+						channel++;
+						if (channel >= AUDIO_MAX_RIDE_MUSIC) {
+							rct_ride_music_info* ride_music_info = gRideMusicInfoList[ride_music_params->tune_id];
+							rct_ride_music* ride_music = &gRideMusicList[ebx];
+							ride_music->sound_channel = Mixer_Play_Music(ride_music_info->path_id, MIXER_LOOP_NONE, true);
+							if (ride_music->sound_channel) {
+								ride_music->volume = ride_music_params->volume;
+								ride_music->pan = ride_music_params->pan;
+								ride_music->frequency = ride_music_params->frequency;
+								ride_music->ride_id = ride_music_params->ride_id;
+								ride_music->tune_id = ride_music_params->tune_id;
+								Mixer_Channel_Volume(ride_music->sound_channel, DStoMixerVolume(ride_music->volume));
+								Mixer_Channel_Pan(ride_music->sound_channel, DStoMixerPan(ride_music->pan));
+								Mixer_Channel_Rate(ride_music->sound_channel, DStoMixerRate(ride_music->frequency));
+								int offset = ride_music_params->offset - 10000;
+								if (offset < 0) {
+									offset = 0;
 								}
-								break;
+								Mixer_Channel_SetOffset(ride_music->sound_channel, offset);
 							}
-							ride_music_params++;
+							return;
 						}
-						Mixer_Stop_Channel(gRideMusicList[channel].sound_channel);
-						ride_music->rideid = -1;
 					}
-				label32:
-					ride_music++;
-					channel++;
-				} while(channel < AUDIO_MAX_RIDE_MUSIC);
 
-				for (rct_ride_music_params* ride_music_params = &gRideMusicParamsList[0]/*&RCT2_GLOBAL(0x009AF430, rct_ride_music_params)*/; ride_music_params < gRideMusicParamsListEnd/*RCT2_GLOBAL(0x009AF42C, rct_ride_music_params*)*/; ride_music_params++) {
-					if (ride_music_params->rideid != (uint8)-1) {
-						rct_ride_music* ride_music = &gRideMusicList[0];//&RCT2_GLOBAL(0x009AF46C, rct_ride_music);
-						int channel = 0;
-						while (ride_music_params->rideid != ride_music->rideid || ride_music_params->tuneid != ride_music->tuneid) {
-							if (ride_music->rideid == (uint8)-1) {
-								ebx = channel;
-							}
-							ride_music++;
-							channel++;
-							if (channel >= AUDIO_MAX_RIDE_MUSIC) {
-								rct_ride_music_info* ride_music_info = ride_music_info_list[ride_music_params->tuneid];
-								rct_ride_music* ride_music = &gRideMusicList[ebx];
-								ride_music->sound_channel = Mixer_Play_Music(ride_music_info->pathid, MIXER_LOOP_NONE, true);
-								if (ride_music->sound_channel) {
-									ride_music->volume = ride_music_params->volume;
-									ride_music->pan = ride_music_params->pan;
-									ride_music->freq = ride_music_params->freq;
-									ride_music->rideid = ride_music_params->rideid;
-									ride_music->tuneid = ride_music_params->tuneid;
-									Mixer_Channel_Volume(ride_music->sound_channel, DStoMixerVolume(ride_music->volume));
-									Mixer_Channel_Pan(ride_music->sound_channel, DStoMixerPan(ride_music->pan));
-									Mixer_Channel_Rate(ride_music->sound_channel, DStoMixerRate(ride_music->freq));
-									int offset = ride_music_params->offset - 10000;
-									if (offset < 0) {
-										offset = 0;
-									}
-									Mixer_Channel_SetOffset(ride_music->sound_channel, offset);
-								} else {
-									//RCT2_GLOBAL(RCT2_ADDRESS_CONFIG_MUSIC, uint8) = 0;
-								}
-								return;
-							}
-						}
-
-						if (ride_music_params->volume != ride_music->volume) {
-							ride_music->volume = ride_music_params->volume;
-							Mixer_Channel_Volume(ride_music->sound_channel, DStoMixerVolume(ride_music->volume));
-						}
-						if (ride_music_params->pan != ride_music->pan) {
-							ride_music->pan = ride_music_params->pan;
-							Mixer_Channel_Pan(ride_music->sound_channel, DStoMixerPan(ride_music->pan));
-						}
-						if (ride_music_params->freq != ride_music->freq) {
-							ride_music->freq = ride_music_params->freq;
-							Mixer_Channel_Rate(ride_music->sound_channel, DStoMixerRate(ride_music->freq));
-						}
-
+					if (ride_music_params->volume != ride_music->volume) {
+						ride_music->volume = ride_music_params->volume;
+						Mixer_Channel_Volume(ride_music->sound_channel, DStoMixerVolume(ride_music->volume));
 					}
+					if (ride_music_params->pan != ride_music->pan) {
+						ride_music->pan = ride_music_params->pan;
+						Mixer_Channel_Pan(ride_music->sound_channel, DStoMixerPan(ride_music->pan));
+					}
+					if (ride_music_params->frequency != ride_music->frequency) {
+						ride_music->frequency = ride_music_params->frequency;
+						Mixer_Channel_Rate(ride_music->sound_channel, DStoMixerRate(ride_music->frequency));
+					}
+
 				}
 			}
 		}
@@ -3597,7 +3620,7 @@ void game_command_set_ride_setting(int *eax, int *ebx, int *ecx, int *edx, int *
 		rct_ride_type* ride_entry = GET_RIDE_ENTRY(ride->subtype);
 		const uint8* available_modes = ride_seek_available_modes(ride);
 
-		if (ride_entry->flags & RIDE_ENTRY_FLAG_17){
+		if ((ride_entry->flags & RIDE_ENTRY_DISABLE_FIRST_TWO_OPERATING_MODES) && !gCheatsShowAllOperatingModes){
 			available_modes += 2;
 		}
 
@@ -3610,7 +3633,7 @@ void game_command_set_ride_setting(int *eax, int *ebx, int *ecx, int *edx, int *
 		if (*available_modes == 0xFF) new_value = default_mode;
 
 		if (available_modes[1] == 0xFF){
-			if (ride_entry->flags & RIDE_ENTRY_FLAG_15)
+			if ((ride_entry->flags & RIDE_ENTRY_DISABLE_LAST_OPERATING_MODE) && !gCheatsShowAllOperatingModes)
 				new_value = default_mode;
 		}
 
@@ -4139,28 +4162,160 @@ static int sub_69ED9E()
 	return max(0, miscSpriteCount + unkCount - 300);
 }
 
+void vehicle_unset_var_48_b1(rct_vehicle *head)
+{
+	uint16 spriteIndex;
+	rct_vehicle *vehicle = head;
+	while (true) {
+		vehicle->update_flags &= ~VEHICLE_UPDATE_FLAG_1;
+		spriteIndex = vehicle->next_vehicle_on_train;
+		if (spriteIndex == SPRITE_INDEX_NULL) {
+			break;
+		}
+		vehicle = GET_VEHICLE(spriteIndex);
+	}
+}
+
+/**
+ *
+ *  rct2: 0x006DDE9E
+ */
+void ride_create_vehicles_find_first_block(rct_ride *ride, rct_xy_element *outXYElement)
+{
+	rct_vehicle *vehicle = GET_VEHICLE(ride->vehicles[0]);
+	int firstX = vehicle->track_x;
+	int firstY = vehicle->track_y;
+	int firstZ = vehicle->track_z;
+	rct_map_element *firstElement = map_get_track_element_at(firstX, firstY, firstZ / 8);
+
+	assert(firstElement != NULL);
+
+	int x = firstX;
+	int y = firstY;
+	int z = firstZ;
+	rct_map_element *trackElement = firstElement;
+	track_begin_end trackBeginEnd;
+	while (track_block_get_previous(x, y, trackElement, &trackBeginEnd)) {
+		x = trackBeginEnd.begin_x;
+		y = trackBeginEnd.begin_y;
+		trackElement = trackBeginEnd.begin_element;
+		if (x == firstX && y == firstY && trackElement == firstElement) {
+			break;
+		}
+
+		int trackType = trackElement->properties.track.type;
+		switch (trackType) {
+		case TRACK_ELEM_25_DEG_UP_TO_FLAT:
+		case TRACK_ELEM_60_DEG_UP_TO_FLAT:
+			if (track_element_is_lift_hill(trackElement)) {
+				outXYElement->x = x;
+				outXYElement->y = y;
+				outXYElement->element = trackElement;
+				return;
+			}
+			break;
+		case TRACK_ELEM_DIAG_25_DEG_UP_TO_FLAT:
+		case TRACK_ELEM_DIAG_60_DEG_UP_TO_FLAT:
+			if (track_element_is_lift_hill(trackElement)) {
+				rct_map_element *mapElement = map_get_first_element_at(x >> 5, y >> 5);
+				do {
+					if (map_element_get_type(mapElement) != MAP_ELEMENT_TYPE_TRACK) continue;
+					if (mapElement->base_height != z) continue;
+					if ((mapElement->properties.track.sequence & 0x0F) != 0) continue;
+					if (mapElement->properties.track.type != trackType) continue;
+					break;
+				} while (!map_element_is_last_for_tile(mapElement));
+
+				outXYElement->x = x;
+				outXYElement->y = y;
+				outXYElement->element = mapElement;
+				return;
+			}
+			break;
+		case TRACK_ELEM_END_STATION:
+		case TRACK_ELEM_CABLE_LIFT_HILL:
+		case 216:
+			outXYElement->x = x;
+			outXYElement->y = y;
+			outXYElement->element = trackElement;
+			return;
+		}
+	}
+
+	outXYElement->x = firstX;
+	outXYElement->y = firstY;
+	outXYElement->element = firstElement;
+}
+
+/**
+ *
+ *  rct2: 0x006DDF9C
+ */
+void loc_6DDF9C(rct_ride *ride, rct_map_element *mapElement)
+{
+	rct_vehicle *train, *car;
+
+	for (int i = 0; i < ride->num_vehicles; i++) {
+		train = GET_VEHICLE(ride->vehicles[i]);
+		if (i == 0) {
+			sub_6DAB4C(train, NULL);
+			vehicle_unset_var_48_b1(train);
+			continue;
+		}
+
+		do {
+			mapElement->flags |= (1 << 5);
+			car = train;
+			while (true) {
+				car->velocity = 0;
+				car->var_2C = 0;
+				car->var_4A = 0;
+				car->var_24 += 13962;
+
+				uint16 spriteIndex = car->next_vehicle_on_train;
+				if (spriteIndex == SPRITE_INDEX_NULL) {
+					break;
+				}
+				car = GET_VEHICLE(spriteIndex);
+			}
+		} while (sub_6DAB4C(train, NULL) & 0x400);
+
+		mapElement->flags |= (1 << 5);
+		car = train;
+		while (true) {
+			car->update_flags &= ~VEHICLE_UPDATE_FLAG_1;
+			car->status = VEHICLE_STATUS_TRAVELLING;
+			if ((car->track_type >> 2) == TRACK_ELEM_END_STATION) {
+				car->status = VEHICLE_STATUS_MOVING_TO_END_OF_STATION;
+			}
+
+			uint16 spriteIndex = car->next_vehicle_on_train;
+			if (spriteIndex == SPRITE_INDEX_NULL) {
+				break;
+			}
+			car = GET_VEHICLE(spriteIndex);
+		}
+	}
+}
+
 /**
  *
  *  rct2: 0x006DD84C
  */
-int ride_create_vehicles(rct_ride *ride, int rideIndex, rct_xy_element *element, int isApplying)
+bool ride_create_vehicles(rct_ride *ride, int rideIndex, rct_xy_element *element, int isApplying)
 {
-	return RCT2_CALLPROC_X(0x006DD84C, element->x, isApplying, element->y, rideIndex, (int)ride, (int)element->element, 0) & 0x100;
+	bool b = !(RCT2_CALLPROC_X(0x006DD84C, element->x, isApplying, element->y, rideIndex, (int)ride, (int)element->element, 0) & 0x100);
+	return b;
 }
 
 /**
  *
  *  rct2: 0x006D31A6
+ *  Checks and initialises the cable lift track
+ *  returns false if unable to find appropriate track.
  */
-static bool sub_6D31A6(rct_ride *ride, bool isApplying)
+static bool ride_initialise_cable_lift_track(rct_ride *ride, bool isApplying)
 {
-	return !(RCT2_CALLPROC_X(0x006D31A6, 0, isApplying ? 1 : 0, 0, 0, 0, (int)ride, 0) & 0x100);
-
-	// TODO This implementation does not work because track_block_get_previous called from track_circuit_iterator_previous seems
-	//      to be ending prematurely and not iterating the complete track. This can be reproduced by constructing a giga coaster
-	//      with a lift hill (pre-designed one will do) and testing it. This means other methods that use
-	//      track_block_get_previous could be faulty. It might a particuarly track block that causes it.
-
 	uint16 xy;
 	int stationIndex;
 	for (stationIndex = 0; stationIndex < 4; stationIndex++) {
@@ -4176,18 +4331,22 @@ static bool sub_6D31A6(rct_ride *ride, bool isApplying)
 	int y = (xy >> 8) * 32;
 	int z = ride->station_heights[stationIndex];
 
+	bool success = false;
 	rct_map_element *mapElement = map_get_first_element_at(x >> 5, y >> 5);
 	do {
-		if (mapElement->type != MAP_ELEMENT_TYPE_TRACK) continue;
+		if (map_element_get_type(mapElement) != MAP_ELEMENT_TYPE_TRACK) continue;
 		if (mapElement->base_height != z) continue;
 
 		int trackType = mapElement->properties.track.type;
 		if (!(RCT2_ADDRESS(0x0099BA64, uint8)[trackType * 16] & 0x10)) {
 			continue;
 		}
-
+		success = true;
 		break;
 	} while (!map_element_is_last_for_tile(mapElement++));
+
+	if (!success)
+		return false;
 
 	enum {
 		STATE_FIND_CABLE_LIFT,
@@ -4241,6 +4400,8 @@ static bool sub_6D31A6(rct_ride *ride, bool isApplying)
 			z = mapElement->base_height * 8;
 			int direction = mapElement->type & 3;
 			trackType = mapElement->properties.track.type;
+			x = it.current.x;
+			y = it.current.y;
 			sub_6C683D(&x, &y, &z, direction, trackType, 0, &mapElement, flags);
 		}
 	}
@@ -4272,7 +4433,7 @@ bool ride_create_cable_lift(int rideIndex, bool isApplying)
 		return false;
 	}
 
-	if (!sub_6D31A6(ride, isApplying)) {
+	if (!ride_initialise_cable_lift_track(ride, isApplying)) {
 		return false;
 	}
 
@@ -4308,13 +4469,13 @@ bool ride_create_cable_lift(int rideIndex, bool isApplying)
 			head = current;
 		} else {
 			tail->next_vehicle_on_train = current->sprite_index;
-			tail->next_or_first_vehicle_on_train = current->sprite_index;
-			current->prev_vehicle_on_train = tail->sprite_index;
+			tail->next_vehicle_on_ride = current->sprite_index;
+			current->prev_vehicle_on_ride = tail->sprite_index;
 		}
 		tail = current;
 	}
-	head->prev_vehicle_on_train = tail->sprite_index;
-	tail->next_or_first_vehicle_on_train = head->sprite_index;
+	head->prev_vehicle_on_ride = tail->sprite_index;
+	tail->next_vehicle_on_ride = head->sprite_index;
 
 	ride->lifecycle_flags |= RIDE_LIFECYCLE_CABLE_LIFT;
 	sub_6DEF56(head);
@@ -4435,7 +4596,7 @@ int ride_is_valid_for_test(int rideIndex, int goingToBeOpen, int isApplying)
 
 	ride = GET_RIDE(rideIndex);
 
-	window_close_by_class(WC_RIDE_CONSTRUCTION);
+	window_close_by_number(WC_RIDE_CONSTRUCTION, rideIndex);
 
 	stationIndex = ride_mode_check_station_present(ride);
 	if (stationIndex == -1)return 0;
@@ -4530,9 +4691,10 @@ int ride_is_valid_for_test(int rideIndex, int goingToBeOpen, int isApplying)
 	if (
 		!ride_type_has_flag(ride->type, RIDE_TYPE_FLAG_13) &&
 		!(ride->lifecycle_flags & RIDE_LIFECYCLE_ON_TRACK)
-		) {
-		if (ride_create_vehicles(ride, rideIndex, &trackElement, isApplying))
+	) {
+		if (!ride_create_vehicles(ride, rideIndex, &trackElement, isApplying)) {
 			return 0;
+		}
 	}
 
 	if (
@@ -4558,7 +4720,7 @@ int ride_is_valid_for_open(int rideIndex, int goingToBeOpen, int isApplying)
 
 	ride = GET_RIDE(rideIndex);
 
-	window_close_by_class(WC_RIDE_CONSTRUCTION);
+	window_close_by_number(WC_RIDE_CONSTRUCTION, rideIndex);
 
 	stationIndex = ride_mode_check_station_present(ride);
 	if (stationIndex == -1)return 0;
@@ -4654,8 +4816,9 @@ int ride_is_valid_for_open(int rideIndex, int goingToBeOpen, int isApplying)
 		!ride_type_has_flag(ride->type, RIDE_TYPE_FLAG_13) &&
 		!(ride->lifecycle_flags & RIDE_LIFECYCLE_ON_TRACK)
 	) {
-		if (ride_create_vehicles(ride, rideIndex, &trackElement, isApplying))
+		if (!ride_create_vehicles(ride, rideIndex, &trackElement, isApplying)) {
 			return 0;
+		}
 	}
 
 	if (
@@ -4765,7 +4928,7 @@ void game_command_set_ride_name(int *eax, int *ebx, int *ecx, int *edx, int *esi
 	int nameChunkIndex = *eax & 0xFFFF;
 
 	RCT2_GLOBAL(RCT2_ADDRESS_NEXT_EXPENDITURE_TYPE, uint8) = RCT_EXPENDITURE_TYPE_RIDE_RUNNING_COSTS * 4;
-	if (*ebx & GAME_COMMAND_FLAG_APPLY) {
+	//if (*ebx & GAME_COMMAND_FLAG_APPLY) { // this check seems to be useless and causes problems in multiplayer
 		int nameChunkOffset = nameChunkIndex - 1;
 		if (nameChunkOffset < 0)
 			nameChunkOffset = 2;
@@ -4773,7 +4936,7 @@ void game_command_set_ride_name(int *eax, int *ebx, int *ecx, int *edx, int *esi
 		RCT2_GLOBAL(newName + nameChunkOffset + 0, uint32) = *edx;
 		RCT2_GLOBAL(newName + nameChunkOffset + 4, uint32) = *ebp;
 		RCT2_GLOBAL(newName + nameChunkOffset + 8, uint32) = *edi;
-	}
+	//}
 
 	if (nameChunkIndex != 0) {
 		*ebx = 0;
@@ -4942,19 +5105,20 @@ static int ride_get_default_mode(rct_ride *ride)
 	for (int i = 0; i < ride->type; i++) {
 		while (*(availableModes++) != 255) {}
 	}
-	if (rideEntry->flags & RIDE_ENTRY_FLAG_17) {
+	if (rideEntry->flags & RIDE_ENTRY_DISABLE_FIRST_TWO_OPERATING_MODES) {
 		availableModes += 2;
 	}
 	return availableModes[0];
 }
 
-static bool ride_with_colour_config_exists(int rideType, const track_colour *colours)
+static bool ride_with_colour_config_exists(rct_ride *srcRide, const track_colour *colours)
 {
 	rct_ride *ride;
 	int i;
 
 	FOR_ALL_RIDES(i, ride) {
-		if (ride->type != rideType) continue;
+		if (ride != srcRide) continue;
+		if (ride->type != srcRide->type) continue;
 		if (ride->track_colour_main[0] != colours->main) continue;
 		if (ride->track_colour_additional[0] != colours->additional) continue;
 		if (ride->track_colour_supports[0] != colours->supports) continue;
@@ -4996,7 +5160,7 @@ static void ride_set_to_random_colour_preset(rct_ride *ride)
 		int listIndex = scenario_rand() % colourPresets->count;
 		colours = &colourPresets->list[listIndex];
 
-		if (!ride_with_colour_config_exists(ride->type, colours)) {
+		if (!ride_with_colour_config_exists(ride, colours)) {
 			break;
 		}
 	}
@@ -5318,7 +5482,7 @@ void game_command_callback_ride_construct_new(int eax, int ebx, int ecx, int edx
 
 void game_command_callback_ride_construct_placed_back(int eax, int ebx, int ecx, int edx, int esi, int edi, int ebp)
 {
-	int trackType, trackDirection, rideIndex, edxRS16, x, y, z, properties;
+	int trackDirection, x, y, z;
 	track_begin_end trackBeginEnd;
 
 	RCT2_GLOBAL(0x00F441D2, uint8) = _currentRideIndex;
@@ -5351,8 +5515,7 @@ void game_command_callback_ride_construct_placed_back(int eax, int ebx, int ecx,
 
 void game_command_callback_ride_construct_placed_front(int eax, int ebx, int ecx, int edx, int esi, int edi, int ebp)
 {
-	int trackType, trackDirection, rideIndex, edxRS16, x, y, z, properties;
-	track_begin_end trackBeginEnd;
+	int trackDirection, x, y, z;
 
 	RCT2_GLOBAL(0x00F441D2, uint8) = _currentRideIndex;
 	trackDirection = _currentTrackPieceDirection;
@@ -5381,6 +5544,27 @@ void game_command_callback_ride_construct_placed_front(int eax, int ebx, int ecx
 	}
 
 	sub_6C84CE();
+}
+
+/**
+*
+* Network client callback when removing ride pieces
+*   Client does execute placing the piece on the same tick as mouse_up - waits for server command
+* Re-executes function from ride_construction - window_ride_construction_mouseup_demolish()
+* Only uses part that deals with construction state
+*/
+
+void game_command_callback_ride_remove_track_piece(int eax, int ebx, int ecx, int edx, int esi, int edi, int ebp)
+{
+	int x, y, z, direction, type;
+
+	x = gRideRemoveTrackPieceCallbackX;
+	y = gRideRemoveTrackPieceCallbackY;
+	z = gRideRemoveTrackPieceCallbackZ;
+	direction = gRideRemoveTrackPieceCallbackDirection;
+	type = gRideRemoveTrackPieceCallbackType;
+
+	window_ride_construction_mouseup_demolish_next_piece(x, y, z, direction, type);
 }
 
 /**
@@ -5441,7 +5625,7 @@ void game_command_demolish_ride(int *eax, int *ebx, int *ecx, int *edx, int *esi
 			uint16 spriteIndex;
 			rct_peep *peep;
 			FOR_ALL_GUESTS(spriteIndex, peep){
-				uint8 ride_id_bit = ride_id & 0x3;
+				uint8 ride_id_bit = ride_id % 8;
 				uint8 ride_id_offset = ride_id / 8;
 				peep->rides_been_on[ride_id_offset] &= ~(1 << ride_id_bit); // clear ride from potentially being in rides_been_on
 				if(peep->state == PEEP_STATE_WATCHING){
@@ -5593,6 +5777,8 @@ void game_command_set_ride_price(int *eax, int *ebx, int *ecx, int *edx, int *es
 	//ecx ecx
 	//edx ride_number
 	//ebp ride_type
+
+	*ebx = 0; // for cost check - changing ride price does not cost anything
 
 	RCT2_GLOBAL(RCT2_ADDRESS_NEXT_EXPENDITURE_TYPE, uint8) = RCT_EXPENDITURE_TYPE_PARK_RIDE_TICKETS * 4;
 	if (flags & 0x1) {
@@ -5797,10 +5983,10 @@ void ride_all_has_any_track_elements(bool *rideIndexArray)
 
 /* rct2: 0x006847BA */
 void set_vehicle_type_image_max_sizes(rct_ride_type_vehicle* vehicle_type, int num_images){
-	char bitmap[200][200] = { 0 };
+	uint8 bitmap[200][200] = { 0 };
 
 	rct_drawpixelinfo dpi = {
-		.bits = (char*)bitmap,
+		.bits = (uint8*)bitmap,
 		.x = -100,
 		.y = -100,
 		.width = 200,
@@ -5872,9 +6058,9 @@ void set_vehicle_type_image_max_sizes(rct_ride_type_vehicle* vehicle_type, int n
 		bl += 16;
 	}
 
-	vehicle_type->var_0E = al;
-	vehicle_type->var_0F = bl;
-	vehicle_type->var_10 = bh;
+	vehicle_type->sprite_width = al;
+	vehicle_type->sprite_height_negative = bl;
+	vehicle_type->sprite_height_positive = bh;
 }
 
 /**
@@ -6132,6 +6318,10 @@ bool ride_select_forwards_from_back()
 money32 ride_remove_track_piece(int x, int y, int z, int direction, int type)
 {
 	RCT2_GLOBAL(RCT2_ADDRESS_GAME_COMMAND_ERROR_TITLE, rct_string_id) = STR_RIDE_CONSTRUCTION_CANT_REMOVE_THIS;
+	if (network_get_mode() == NETWORK_MODE_CLIENT)
+	{
+		game_command_callback = game_command_callback_ride_remove_track_piece;
+	}
 	return game_do_command(x, (GAME_COMMAND_FLAG_APPLY) | ((direction & 3) << 8), y, type, GAME_COMMAND_REMOVE_TRACK, z, 0);
 }
 
@@ -6174,8 +6364,8 @@ void invalidate_test_results(int rideIndex)
 		for (int i = 0; i < ride->num_vehicles; i++) {
 			uint16 spriteIndex = ride->vehicles[i];
 			if (spriteIndex != SPRITE_INDEX_NULL) {
-				rct_vehicle *vehicle = &(g_sprite_list[spriteIndex].vehicle);
-				vehicle->var_48 &= ~(1 << 5);
+				rct_vehicle *vehicle = GET_VEHICLE(spriteIndex);
+				vehicle->update_flags &= ~VEHICLE_UPDATE_FLAG_TESTING;
 			}
 		}
 	}
@@ -6202,10 +6392,10 @@ void ride_fix_breakdown(int rideIndex, int reliabilityIncreaseFactor)
 		for (int i = 0; i < ride->num_vehicles; i++) {
 			spriteIndex = ride->vehicles[i];
 			while (spriteIndex != SPRITE_INDEX_NULL) {
-				vehicle = &(g_sprite_list[spriteIndex].vehicle);
-				vehicle->var_48 &= ~(1 << 7);
-				vehicle->var_48 &= ~(1 << 8);
-				vehicle->var_48 &= ~(1 << 9);
+				vehicle = GET_VEHICLE(spriteIndex);
+				vehicle->update_flags &= ~VEHICLE_UPDATE_FLAG_7;
+				vehicle->update_flags &= ~VEHICLE_UPDATE_FLAG_BROKEN_CAR;
+				vehicle->update_flags &= ~VEHICLE_UPDATE_FLAG_BROKEN_TRAIN;
 				spriteIndex = vehicle->next_vehicle_on_train;
 			}
 		}
@@ -6223,9 +6413,9 @@ static void ride_update_vehicle_colours(int rideIndex)
 {
 	rct_ride *ride;
 	rct_vehicle *vehicle;
-	rct_vehicle_colour colours;
+	rct_vehicle_colour colours = { 0 };
 	uint16 spriteIndex;
-	uint8 coloursExtended;
+	uint8 coloursExtended = 0;
 
 	ride = GET_RIDE(rideIndex);
 	if (ride->type == RIDE_TYPE_SPACE_RINGS || ride_type_has_flag(ride->type, RIDE_TYPE_FLAG_16)) {
@@ -6236,7 +6426,7 @@ static void ride_update_vehicle_colours(int rideIndex)
 		int carIndex = 0;
 		spriteIndex = ride->vehicles[i];
 		while (spriteIndex != SPRITE_INDEX_NULL) {
-			vehicle = &(g_sprite_list[spriteIndex].vehicle);
+			vehicle = GET_VEHICLE(spriteIndex);
 			switch (ride->colour_scheme_type & 3) {
 			case RIDE_COLOUR_SCHEME_ALL_SAME:
 				colours = ride->vehicle_colours[0];
@@ -6386,7 +6576,7 @@ void ride_update_max_vehicles(int rideIndex)
 			for (int i = 0; i < numCars; i++) {
 				vehicleEntry = &rideEntry->vehicles[trainLayout[i]];
 				trainLength += vehicleEntry->var_04;
-				totalFriction += vehicleEntry->var_08;
+				totalFriction += vehicleEntry->car_friction;
 			}
 
 			if (trainLength <= stationLength && totalFriction <= maxFriction) {
@@ -6394,7 +6584,9 @@ void ride_update_max_vehicles(int rideIndex)
 				break;
 			}
 		}
+		int newCarsPerTrain = max(ride->var_0CB, rideEntry->min_cars_in_train);
 		maxCarsPerTrain = max(maxCarsPerTrain, rideEntry->min_cars_in_train);
+		newCarsPerTrain = min(maxCarsPerTrain, newCarsPerTrain);
 		ride->min_max_cars_per_train = maxCarsPerTrain | (rideEntry->min_cars_in_train << 4);
 
 		switch (ride->mode) {
@@ -6411,15 +6603,15 @@ void ride_update_max_vehicles(int rideIndex)
 			break;
 		default:
 			// Calculate maximum number of trains
-			ride_entry_get_train_layout(ride->subtype, maxCarsPerTrain, trainLayout);
+			ride_entry_get_train_layout(ride->subtype, newCarsPerTrain, trainLayout);
 			trainLength = 0;
-			for (int i = 0; i < maxCarsPerTrain; i++) {
+			for (int i = 0; i < newCarsPerTrain; i++) {
 				vehicleEntry = &rideEntry->vehicles[trainLayout[i]];
 				trainLength += vehicleEntry->var_04;
 			}
 
 			int totalLength = trainLength / 2;
-			if (maxCarsPerTrain != 1)
+			if (newCarsPerTrain != 1)
 				totalLength /= 2;
 
 			maxNumTrains = 0;
@@ -6434,21 +6626,21 @@ void ride_update_max_vehicles(int rideIndex)
 			) {
 				maxNumTrains = min(maxNumTrains, 31);
 			} else {
-				ride_entry_get_train_layout(ride->subtype, maxCarsPerTrain, trainLayout);
+				ride_entry_get_train_layout(ride->subtype, newCarsPerTrain, trainLayout);
 				vehicleEntry = &rideEntry->vehicles[trainLayout[0]];
-				int unk = vehicleEntry->var_5C;
+				int speed = vehicleEntry->powered_max_speed;
 
 				int totalSpacing = 0;
-				for (int i = 0; i < maxCarsPerTrain; i++) {
+				for (int i = 0; i < newCarsPerTrain; i++) {
 					vehicleEntry = &rideEntry->vehicles[trainLayout[i]];
 					totalSpacing += vehicleEntry->var_04;
 				}
 
 				totalSpacing >>= 13;
 				int trackLength = ride_get_track_length(ride) / 4;
-				if (unk > 10) trackLength = (trackLength * 3) / 4;
-				if (unk > 25) trackLength = (trackLength * 3) / 4;
-				if (unk > 40) trackLength = (trackLength * 3) / 4;
+				if (speed > 10) trackLength = (trackLength * 3) / 4;
+				if (speed > 25) trackLength = (trackLength * 3) / 4;
+				if (speed > 40) trackLength = (trackLength * 3) / 4;
 
 				maxNumTrains = 0;
 				int length = 0;
@@ -6461,7 +6653,7 @@ void ride_update_max_vehicles(int rideIndex)
 		}
 		ride->max_trains = maxNumTrains;
 
-		numCarsPerTrain = min(ride->var_0CB, maxCarsPerTrain);
+		numCarsPerTrain = min(ride->var_0CB, newCarsPerTrain);
 		numVehicles = min(ride->var_0CA, maxNumTrains);
 	} else {
 		ride->max_trains = rideEntry->cars_per_flat_ride;
@@ -6831,7 +7023,7 @@ money32 place_ride_entrance_or_exit(sint16 x, sint16 y, sint16 z, uint8 directio
 				ride->exits[station_num] = (x / 32) | (y / 32 << 8);
 			} else {
 				ride->entrances[station_num] = (x / 32) | (y / 32 << 8);
-				ride->first_peep_in_queue[station_num] = 0xFFFF;
+				ride->last_peep_in_queue[station_num] = 0xFFFF;
 				ride->queue_length[station_num] = 0;
 
 				map_animation_create(MAP_ANIMATION_TYPE_RIDE_ENTRANCE, x, y, z / 8);
@@ -6956,11 +7148,14 @@ void ride_crash(int rideIndex, int vehicleIndex)
 	vehicleIndex &= 0xFF;
 
 	ride = GET_RIDE(rideIndex);
-	vehicle = &(g_sprite_list[ride->vehicles[vehicleIndex]]).vehicle;
+	vehicle = GET_VEHICLE(ride->vehicles[vehicleIndex]);
 
-	w = window_ride_open_vehicle(vehicle);
-	if (w->viewport != NULL) {
-		w->viewport->flags |= VIEWPORT_FLAG_SOUND_ON;
+	if (!(RCT2_GLOBAL(RCT2_ADDRESS_SCREEN_FLAGS, uint8) & SCREEN_FLAGS_TITLE_DEMO)) {
+		// Open ride window for crashed vehicle
+		w = window_ride_open_vehicle(vehicle);
+		if (w->viewport != NULL) {
+			w->viewport->flags |= VIEWPORT_FLAG_SOUND_ON;
+		}
 	}
 
 	RCT2_GLOBAL(RCT2_ADDRESS_COMMON_FORMAT_ARGS + 0, rct_string_id) = ride->name;
@@ -6997,7 +7192,6 @@ bool shop_item_is_food_or_drink(int shopItem)
 	case SHOP_ITEM_CHOCOLATE:
 	case SHOP_ITEM_ICED_TEA:
 	case SHOP_ITEM_FUNNEL_CAKE:
-	case SHOP_ITEM_SUNGLASSES:
 	case SHOP_ITEM_BEEF_NOODLES:
 	case SHOP_ITEM_FRIED_RICE_NOODLES:
 	case SHOP_ITEM_WONTON_SOUP:
@@ -7008,6 +7202,72 @@ bool shop_item_is_food_or_drink(int shopItem)
 	case SHOP_ITEM_SUB_SANDWICH:
 	case SHOP_ITEM_COOKIE:
 	case SHOP_ITEM_ROAST_SAUSAGE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool shop_item_is_food(int shopItem)
+{
+	switch (shopItem) {
+	case SHOP_ITEM_BURGER:
+	case SHOP_ITEM_FRIES:
+	case SHOP_ITEM_ICE_CREAM:
+	case SHOP_ITEM_COTTON_CANDY:
+	case SHOP_ITEM_PIZZA:
+	case SHOP_ITEM_POPCORN:
+	case SHOP_ITEM_HOT_DOG:
+	case SHOP_ITEM_TENTACLE:
+	case SHOP_ITEM_CANDY_APPLE:
+	case SHOP_ITEM_DONUT:
+	case SHOP_ITEM_CHICKEN:
+	case SHOP_ITEM_PRETZEL:
+	case SHOP_ITEM_FUNNEL_CAKE:
+	case SHOP_ITEM_BEEF_NOODLES:
+	case SHOP_ITEM_FRIED_RICE_NOODLES:
+	case SHOP_ITEM_WONTON_SOUP:
+	case SHOP_ITEM_MEATBALL_SOUP:
+	case SHOP_ITEM_SUB_SANDWICH:
+	case SHOP_ITEM_COOKIE:
+	case SHOP_ITEM_ROAST_SAUSAGE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool shop_item_is_drink(int shopItem)
+{
+	switch (shopItem) {
+	case SHOP_ITEM_DRINK:
+	case SHOP_ITEM_COFFEE:
+	case SHOP_ITEM_LEMONADE:
+	case SHOP_ITEM_CHOCOLATE:
+	case SHOP_ITEM_ICED_TEA:
+	case SHOP_ITEM_FRUIT_JUICE:
+	case SHOP_ITEM_SOYBEAN_MILK:
+	case SHOP_ITEM_SU_JONGKWA:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool shop_item_is_souvenir(int shopItem)
+{
+	switch (shopItem) {
+	case SHOP_ITEM_BALLOON:
+	case SHOP_ITEM_TOY:
+	case SHOP_ITEM_MAP:
+	case SHOP_ITEM_PHOTO:
+	case SHOP_ITEM_UMBRELLA:
+	case SHOP_ITEM_HAT:
+	case SHOP_ITEM_TSHIRT:
+	case SHOP_ITEM_PHOTO2:
+	case SHOP_ITEM_PHOTO3:
+	case SHOP_ITEM_PHOTO4:
+	case SHOP_ITEM_SUNGLASSES:
 		return true;
 	default:
 		return false;

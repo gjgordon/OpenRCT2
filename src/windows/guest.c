@@ -23,6 +23,7 @@
 #include "../game.h"
 #include "../input.h"
 #include "../management/marketing.h"
+#include "../network/network.h"
 #include "../peep/peep.h"
 #include "../peep/staff.h"
 #include "../ride/ride.h"
@@ -732,7 +733,7 @@ void window_guest_viewport_init(rct_window* w){
 			focus.sprite.type |= VIEWPORT_FOCUS_TYPE_SPRITE | VIEWPORT_FOCUS_TYPE_COORDINATE;
 			focus.sprite.pad_486 &= 0xFFFF;
 		}
-		focus.coordinate.rotation = RCT2_GLOBAL(RCT2_ADDRESS_CURRENT_ROTATION, uint8);
+		focus.coordinate.rotation = get_current_rotation();
 	}
 
 	uint16 viewport_flags;
@@ -774,7 +775,7 @@ void window_guest_viewport_init(rct_window* w){
 			int height = view_widget->bottom - view_widget->top - 1;
 
 			viewport_create(w, x, y, width, height, 0, focus.coordinate.x, focus.coordinate.y, focus.coordinate.z, focus.sprite.type & VIEWPORT_FOCUS_TYPE_MASK, focus.sprite.sprite_id);
-			w->flags |= WF_2;
+			w->flags |= WF_NO_SCROLLING;
 			window_invalidate(w);
 		}
 	}
@@ -1083,13 +1084,16 @@ void window_guest_overview_update(rct_window* w){
 	else
 		w->var_494++;
 
-	// Create the "I have the strangest feeling I am being watched thought"
-	if ((w->var_494 & 0xFFFF) >= 3840){
-		if (!(w->var_494 & 0x3FF)){
-			int rand = scenario_rand() & 0xFFFF;
-			if (rand <= 0x2AAA){
-				rct_peep* peep = GET_PEEP(w->number);
-				peep_insert_new_thought(peep, PEEP_THOUGHT_TYPE_WATCHED, 0xFF);
+	// Disable peep watching thought for multiplayer as its client specific
+	if (network_get_mode() == NETWORK_MODE_NONE) {
+		// Create the "I have the strangest feeling I am being watched thought"
+		if ((w->var_494 & 0xFFFF) >= 3840) {
+			if (!(w->var_494 & 0x3FF)) {
+				int random = rand() & 0xFFFF;
+				if (random <= 0x2AAA) {
+					rct_peep* peep = GET_PEEP(w->number);
+					peep_insert_new_thought(peep, PEEP_THOUGHT_TYPE_WATCHED, 0xFF);
+				}
 			}
 		}
 	}
@@ -1184,7 +1188,7 @@ void window_guest_overview_tool_down(rct_window* w, int widgetIndex, int x, int 
 		window_error_open(0x785,-1);
 		return;
 	}
-
+	
 	if (!map_can_construct_at(tile_x, tile_y, dest_z / 8, (dest_z / 8) + 1, 15)){
 		if (RCT2_GLOBAL(RCT2_ADDRESS_GAME_COMMAND_ERROR_TEXT, uint16) != 0x3A5 ){
 			if (RCT2_GLOBAL(RCT2_ADDRESS_GAME_COMMAND_ERROR_TEXT, uint16) != 0x49B){
@@ -1514,7 +1518,7 @@ void window_guest_rides_update(rct_window *w)
 	uint8 curr_list_position = 0;
 	for (uint8 ride_id = 0; ride_id < 255; ++ride_id){
 		// Offset to the ride_id bit in peep_rides_been_on
-		uint8 ride_id_bit = ride_id & 0x7;
+		uint8 ride_id_bit = ride_id % 8;
 		uint8 ride_id_offset = ride_id / 8;
 		if (peep->rides_been_on[ride_id_offset] & (1 << ride_id_bit)){
 			rct_ride* ride = GET_RIDE(ride_id);
@@ -1534,7 +1538,7 @@ void window_guest_rides_update(rct_window *w)
 /* rct2: 0x697844 */
 void window_guest_rides_tooltip(rct_window* w, int widgetIndex, rct_string_id *stringId)
 {
-	RCT2_GLOBAL(0x013CE952, uint16) = STR_LIST;
+	RCT2_GLOBAL(RCT2_ADDRESS_COMMON_FORMAT_ARGS, uint16) = STR_LIST;
 }
 
 /* rct2: 0x69784E */
@@ -1665,7 +1669,7 @@ void window_guest_rides_scroll_paint(rct_window *w, rct_drawpixelinfo *dpi, int 
 	// dx
 	int bottom = dpi->y + dpi->height - 1;
 
-	int colour = RCT2_ADDRESS(0x141FC48, uint8)[w->colours[1] * 8];
+	int colour = ColourMapA[w->colours[1]].mid_light;
 	gfx_fill_rect(dpi, left, top, right, bottom, colour);
 
 	for (int list_index = 0; list_index < w->no_list_items; list_index++){
