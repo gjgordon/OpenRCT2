@@ -54,6 +54,7 @@ Includes all git commit authors. Aliases are GitHub user names.
 * (halfbro)
 * (Myrtle)
 * (nean)
+* Michael Pham (nightroan)
 
 ## Toolchain
 * (Balletie) - OSX
@@ -61,6 +62,7 @@ Includes all git commit authors. Aliases are GitHub user names.
 * Miso Zmiric (mzmiric5) - OSX
 * Jarno Veuger (JarnoVgr) - Windows build server
 * Ted John (IntelOrca) - Windows
+* Michał Janiszewski (janisozaur) - Linux, Travis CI
 
 ## Documentation
 * (honzi)
@@ -68,7 +70,7 @@ Includes all git commit authors. Aliases are GitHub user names.
 * James Robertson (rd3k)
 * Max Boße (MakaHost)
 * (MaxBareiss)
-* Philip Plarkson (Philpax)
+* Mithun Hunsur (Philpax)
 * (RollingStar)
 
 ## Translation

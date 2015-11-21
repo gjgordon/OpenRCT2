@@ -17,6 +17,7 @@
 #include "../world/banner.h"
 #include "../world/scenery.h"
 #include "../management/research.h"
+#include "../util/util.h"
 #include "console.h"
 #include "window.h"
 #include "viewport.h"
@@ -154,7 +155,7 @@ void console_draw(rct_drawpixelinfo *dpi)
 
 	int x = _consoleLeft + 4;
 	int y = _consoleTop + 4;
-	
+
 	// Draw previous lines
 	utf8 lineBuffer[2 + 256], *lineCh;
 	ch = _consoleViewBufferStart;
@@ -797,7 +798,7 @@ static int cc_load_object(const utf8 **argv, int argc) {
 							scenery_set_default_placement_configuration();
 							window_new_ride_init_vars();
 
-							RCT2_GLOBAL(0x009DEB7C, uint16) = 0;
+							RCT2_GLOBAL(RCT2_ADDRESS_WINDOW_UPDATE_TICKS, uint16) = 0;
 							gfx_invalidate_screen();
 							console_writeline("Object file loaded.");
 						}
@@ -933,7 +934,7 @@ console_command console_command_table[] = {
 	{ "windows", cc_windows, "Lists all the windows that can be opened.", "windows" },
 	{ "load_object", cc_load_object, "Loads the object file into the scenario.\n"
 									"Loading a scenery group will not load its associated objects.\n"
-									"This is a safer method opposed to \"open object_selection\".", 
+									"This is a safer method opposed to \"open object_selection\".",
 									"load_object <objectfilenodat>" },
 	{ "object_count", cc_object_count, "Shows the number of objects of each type in the scenario.", "object_count" },
 	{ "twitch", cc_twitch, "Twitch API" },
